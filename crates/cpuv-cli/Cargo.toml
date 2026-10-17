@@ -1,0 +1,41 @@
+[package]
+name = "cpuv-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "cpuv"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+toml.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+fs2.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+walkdir.workspace = true
+tar.workspace = true
+flate2.workspace = true
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+self-replace = "1.5"
+cpuv-toolchain.workspace = true
+cpuv-solver.workspace = true
+cpuv-fetch.workspace = true
+cpuv-store.workspace = true
+cpuv-relocate.workspace = true
+cpuv-shim.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
