@@ -28,6 +28,8 @@ Commit and upload the source first. Set the workspace version in Cargo.toml and 
 
 Alternatively, create a GitHub Release for the matching tag and attach all five locally built assets above. Upload executable assets, not just GitHub's automatically generated source ZIP. When using manual upload, publish only after all assets are attached.
 
+For the stable installer channel, clear "This is a pre-release" and select "Set as latest release". GitHub excludes prereleases from the latest release endpoint; if only a prerelease exists, releases/latest/download/install.ps1 returns 404 even when its assets are uploaded. The release workflow explicitly clears the prerelease flag before setting the completed release as latest.
+
 Public installation then uses:
 
 ~~~powershell

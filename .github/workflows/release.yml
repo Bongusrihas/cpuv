@@ -63,4 +63,4 @@ jobs:
             fi
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
