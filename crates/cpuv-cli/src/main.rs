@@ -613,17 +613,44 @@ async fn sync(
             vec![]
         } else {
             let index_start = Instant::now();
-            let index = fetcher.index(cli.refresh || force_resolve).await?;
+            let index = fetcher
+                .index_for_requirements(&roots, cli.refresh || force_resolve)
+                .await?;
             index_fetch_ms = index_start.elapsed().as_secs_f64() * 1000.0;
-            if roots.iter().any(|requirement| {
-                let name = cpuv_solver::split_requirement(requirement).0;
-                !cpuv_solver::available(&index, name, namespace)
-            }) {
+            let missing: Vec<_> = roots
+                .iter()
+                .filter(|requirement| {
+                    let name = cpuv_solver::split_requirement(requirement).0;
+                    !cpuv_solver::available(&index, name, namespace)
+                })
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
                 eprintln!(
-                    "A dependency is absent from the MSYS2 snapshot; querying the shared ConanCenter catalog..."
+                    "MSYS2 snapshot for {repository} does not provide: {}. Querying the shared ConanCenter catalog...",
+                    missing.join(", ")
                 );
+                let lookup_errors = missing
+                    .iter()
+                    .filter_map(|requirement| {
+                        cpuv_solver::resolve_for(
+                            &index,
+                            std::slice::from_ref(requirement),
+                            namespace,
+                        )
+                        .err()
+                        .map(|error| error.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 manifest.backend = Backend::Conan;
-                return source::sync(root, cli, &manifest, &tc, force_resolve).await;
+                return source::sync(root, cli, &manifest, &tc, force_resolve)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Automatic catalog fallback failed. MSYS2 lookup in {repository}:\n{lookup_errors}\nPackage names and availability differ between providers; check the exact upstream name and version. ConanCenter error follows"
+                        )
+                    });
             }
             cpuv_solver::resolve_for(&index, &roots, namespace)?
         }

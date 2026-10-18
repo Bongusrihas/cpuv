@@ -91,6 +91,38 @@ impl Fetcher {
     }
 
     pub async fn index(&self, refresh: bool) -> Result<Index> {
+        Ok(self.index_with_source(refresh).await?.0)
+    }
+
+    /// Recheck a cached negative lookup against the repository before selecting
+    /// another provider. Offline lookups never contact the repository.
+    pub async fn index_for_requirements(
+        &self,
+        requirements: &[String],
+        refresh: bool,
+    ) -> Result<Index> {
+        let (index, cached) = self.index_with_source(refresh).await?;
+        if cached
+            && !self.offline
+            && requirements.iter().any(|requirement| {
+                !cpuv_solver::available(
+                    &index,
+                    cpuv_solver::split_requirement(requirement).0,
+                    &self.package_prefix,
+                )
+            })
+        {
+            eprintln!(
+                "Requested packages are absent from the cached MSYS2 index; refreshing repository metadata..."
+            );
+            return self.index(true).await.context(
+                "Could not refresh a missing-package lookup; repository availability is unconfirmed",
+            );
+        }
+        Ok(index)
+    }
+
+    async fn index_with_source(&self, refresh: bool) -> Result<(Index, bool)> {
         let key = format!("{:x}", Sha256::digest(self.repository.as_bytes()));
         let dir = self.cache.join("index");
         tokio::fs::create_dir_all(&dir).await?;
@@ -114,10 +146,11 @@ impl Fetcher {
                 .context("No cached repository index; run once online")?;
             let prefix = self.package_prefix.clone();
             let limits = self.limits.clone();
-            return tokio::task::spawn_blocking(move || {
+            let index = tokio::task::spawn_blocking(move || {
                 parse_database_with_limits(&bytes, &prefix, &limits)
             })
-            .await?;
+            .await??;
+            return Ok((index, true));
         }
         let url = format!("{}/{}", self.repository, self.database);
         let mut last = None;
@@ -149,7 +182,7 @@ impl Fetcher {
                     let temp = tempfile::NamedTempFile::new_in(&dir)?;
                     tokio::fs::write(temp.path(), &bytes).await?;
                     temp.persist(&file).map_err(|e| e.error)?;
-                    return Ok(index);
+                    return Ok((index, false));
                 }
                 Err(e) => {
                     last = Some(e);

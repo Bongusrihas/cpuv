@@ -2,6 +2,9 @@
 
 ## 0.0.2 — 2026-10-18
 
+- Refresh cached negative MSYS2 package lookups once online before automatic catalog fallback; retain offline behavior and preserve the cache on refresh failure.
+- Report the exact missing requirements and repository suggestions when catalog fallback fails, preserving both providers' diagnostics and distinguishing catalog resolution from compilation failures.
+
 - Add cpuv uninstall and a read-only --dry-run preview, Windows self deletion, recognized companion cleanup, and user PATH cleanup that preserves shared tool directories and project/cache data.
 - Add cpuv rm as an alias for dependency removal, retaining shared dependencies and caches while rebuilding the remaining environment.
 - Remove cpuv-owned library recipes, library patches, custom recipe registries, and --recipes.

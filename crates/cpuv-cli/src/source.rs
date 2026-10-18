@@ -239,8 +239,16 @@ fn run(command: &mut Command, log: &Path) -> Result<()> {
             .rev()
             .collect::<Vec<_>>()
             .join("\n");
+        let explanation = if tail
+            .lines()
+            .any(|line| line.starts_with("ERROR: Package '") && line.contains("not resolved:"))
+        {
+            "ConanCenter could not resolve this package name/version; see the remote error above for the cause. Resolution failed before compilation, so this error does not establish a GCC, linker, or ABI incompatibility. A package must be published in the selected catalog; cpuv cannot infer an unregistered library's build instructions."
+        } else {
+            "See the provider error above and the full log for the failed operation. Catalog availability, compiler support, network access, and build requirements are determined by the upstream provider."
+        };
         bail!(
-            "Community catalog install failed ({status}). Log: {}\n{tail}\nA package must exist in the catalog and support the selected compiler; cpuv does not guess missing build instructions",
+            "Community catalog command failed ({status}). Log: {}\n{tail}\n{explanation}",
             log.display()
         );
     }
