@@ -1,6 +1,6 @@
 # Compiler, linker, and ABI compatibility
 
-Version **0.0.1** does not support every possible Windows/GCC/linker/ABI combination. Installing g++ alone does not guarantee that a precompiled dependency is compatible.
+Version **0.0.2** does not support every possible Windows/GCC/linker/ABI combination. Installing g++ alone does not guarantee that a precompiled dependency is compatible.
 
 ## Application platform
 
@@ -8,16 +8,16 @@ The prebuilt cpuv application targets Windows 10 or newer on x86-64. It does not
 
 ## Supported combinations
 
-| Component | Version 0.0.1 boundary |
+| Component | Version 0.0.2 boundary |
 | --- | --- |
 | Compiler discovery | Explicit executable, CPUV_CXX/CXX, PATH, then discovered MSYS2 installation roots and Windows registration |
 | Native compilation | Recognized GCC distributions use their own compiler/runtime; language defaults adapt to observed capabilities |
 | Managed prebuilt dependencies | MSYS2 UCRT64, x86-64, POSIX threads, SEH exceptions, libstdc++ dual ABI 1, with matching runtime package versions |
-| Source dependencies | Pinned recipes built with the selected GCC and saved CPPFLAGS/CFLAGS/CXXFLAGS/LDFLAGS; initially fmt, Eigen, and zlib |
+| Source dependencies | ConanCenter packages built/reused with the selected native MinGW GCC and saved profile; package/compiler support comes from upstream metadata |
 | Linker | Selected and invoked by GCC; must support the target, object format, runtime, and driver options |
 | Other C++ ecosystems | MSVC, Clang, other managed binary providers, and cross-OS compilation are outside this release |
 
-When a compiler has no supported binary provider, the repository runtime does not match, or a custom profile is requested, cpuv selects source builds. Every dependency then needs a recipe and must support that compiler's features. An older GCC cannot build a library requiring an unsupported language mode. No incompatible UCRT64 binary is silently substituted for a missing recipe.
+When a compiler has no supported binary provider, the repository runtime does not match, or a custom profile is requested, cpuv selects ConanCenter. Every dependency must exist there and support that compiler's features. An older GCC cannot build a library requiring an unsupported language mode. No incompatible UCRT64 binary is silently substituted for an absent or unsupported catalog package.
 
 ## Why any ABI is not possible
 
@@ -36,9 +36,9 @@ cpuv supplies the planned include directories, library directories, definitions,
 1. Run cpuv init to discover and record the real compiler.
 2. Run cpuv toolchain to inspect its target, runtime, ABI observations, provider, and linker.
 3. Run cpuv doctor to compile, link, and execute a small native program. Additional flags after -- check the driver's actual linker setup.
-4. Run cpuv add for compatible binaries or recipe-backed source dependencies. Use --from-source explicitly when desired.
+4. Run cpuv add for compatible MSYS2 binaries or ConanCenter packages. Use --from-source explicitly when desired.
 5. Run cpuv run g++ program.cpp to compile and execute with the project's package metadata and DLL paths.
 
-Source builds bootstrap pinned x64 Windows CMake/Ninja tools into cpuv's cache. They execute trusted upstream build code and may need additional tools declared by a recipe. Only the starter recipe set is included; support for another library requires implementing and validating its recipe. See [source builds](source-builds.md).
+Catalog mode bootstraps standalone Conan, CMake, and Ninja into the cache. It requires no system Python or Rust. ConanCenter maintains package build instructions; cpuv contains no per-library recipes. Some upstream builds need additional system tools. Cygwin and cross-OS catalog builds are not supported by this adapter. See [catalog installation](source-builds.md).
 
 Open-source licensing gives users the right to inspect, modify, build, and redistribute cpuv under Apache-2.0. It does not imply universal binary compatibility. The repository contains all first-party implementation code; third-party dependencies retain their own licenses.

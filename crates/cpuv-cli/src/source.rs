@@ -1,10 +1,8 @@
-//! Recipe-backed builds using the user's compiler, flags, ABI and driver linker.
+//! Community catalog backend: cpuv contains no per-library source recipes.
 use super::*;
 use std::collections::BTreeSet;
-
 mod archive;
 mod tools;
-
 #[derive(Clone, Serialize, Deserialize)]
 struct Archive {
     url: String,
@@ -20,73 +18,6 @@ struct Archive {
 fn one() -> usize {
     1
 }
-fn cxx_level(tc: &Toolchain) -> u16 {
-    let value = tc
-        .observed_abi_options
-        .get("__cplusplus")
-        .and_then(|value| {
-            value
-                .trim_end_matches(|c: char| c.is_ascii_alphabetic())
-                .parse::<u32>()
-                .ok()
-        })
-        .unwrap_or(0);
-    if value >= 202400 {
-        26
-    } else if value >= 202302 {
-        23
-    } else if value >= 202002 {
-        20
-    } else if value >= 201703 {
-        17
-    } else if value >= 201402 {
-        14
-    } else if value >= 201103 {
-        11
-    } else {
-        98
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Recipe {
-    version: String,
-    #[serde(flatten)]
-    source: Archive,
-    #[serde(default)]
-    cmake: Vec<String>,
-    #[serde(default)]
-    dependencies: Vec<String>,
-    #[serde(default)]
-    requires_c: bool,
-    #[serde(default)]
-    minimum_cxx: u16,
-    license_file: String,
-    #[serde(default)]
-    patches: Vec<Patch>,
-    #[serde(default)]
-    interface: Option<Interface>,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Patch {
-    file: String,
-    find: String,
-    replace: String,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Interface {
-    module: String,
-    #[serde(default)]
-    libraries: Vec<String>,
-    #[serde(default)]
-    libraries_by_runtime: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    cflags: Vec<String>,
-    #[serde(default)]
-    requires: Vec<String>,
-}
 #[derive(Clone, Serialize, Deserialize)]
 struct Tool {
     version: String,
@@ -94,78 +25,21 @@ struct Tool {
     source: Archive,
     executable: String,
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Deserialize)]
 struct Registry {
-    schema: u32,
-    #[serde(default)]
-    packages: BTreeMap<String, Recipe>,
-    #[serde(default)]
     tools: BTreeMap<String, Tool>,
 }
-
 pub fn custom_profile_requested() -> bool {
     ["CPPFLAGS", "CFLAGS", "CXXFLAGS", "LDFLAGS"]
         .iter()
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
-
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Profile {
     cpp: Vec<String>,
     c: Vec<String>,
     cxx: Vec<String>,
     link: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SourceLock {
-    version: u32,
-    backend: String,
-    dependencies: BTreeMap<String, Dependency>,
-    packages: BTreeMap<String, Recipe>,
-    tools: BTreeMap<String, Tool>,
-    profile: Profile,
-    compiler: Toolchain,
-    compiler_sha256: String,
-    cache_key: String,
-}
-/// Portable project lock: local executable/cache paths belong under .cpuv only.
-#[derive(Serialize, Deserialize)]
-struct ProjectLock {
-    version: u32,
-    backend: String,
-    dependencies: BTreeMap<String, Dependency>,
-    packages: BTreeMap<String, Recipe>,
-    tools: BTreeMap<String, Tool>,
-    profile: Profile,
-    #[serde(default)]
-    gcc_version: String,
-    #[serde(default)]
-    abi: Option<cpuv_toolchain::AbiTuple>,
-    #[serde(default)]
-    compiler_sha256: String,
-}
-impl From<&SourceLock> for ProjectLock {
-    fn from(value: &SourceLock) -> Self {
-        Self {
-            version: value.version,
-            backend: value.backend.clone(),
-            dependencies: value.dependencies.clone(),
-            packages: value.packages.clone(),
-            tools: value.tools.clone(),
-            profile: value.profile.clone(),
-            gcc_version: value.compiler.gcc_version.clone(),
-            abi: Some(value.compiler.abi.clone()),
-            compiler_sha256: value.compiler_sha256.clone(),
-        }
-    }
-}
-#[derive(Serialize, Deserialize)]
-struct Installed {
-    original_prefix: String,
-    files: BTreeMap<String, String>,
-    ownership: BTreeMap<String, Vec<PathBuf>>,
 }
 
 #[cfg(windows)]
@@ -241,645 +115,391 @@ impl Profile {
     }
 }
 
-// CMake expands flag strings into a Windows command line; preserve spaces and quotes.
-fn joined(flags: impl Iterator<Item = String>) -> String {
-    flags
-        .map(|flag| {
-            let mut out = String::from("\"");
-            let mut slashes = 0;
-            for character in flag.chars() {
-                if character == '\\' {
-                    slashes += 1;
-                } else {
-                    out.push_str(&"\\".repeat(if character == '"' {
-                        slashes * 2 + 1
-                    } else {
-                        slashes
-                    }));
-                    slashes = 0;
-                    out.push(character);
-                }
-            }
-            out.push_str(&"\\".repeat(slashes * 2));
-            out.push('"');
-            out
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+#[derive(Serialize, Deserialize)]
+struct CatalogLock {
+    version: u32,
+    backend: String,
+    dependencies: BTreeMap<String, Dependency>,
+    profile: Profile,
+    gcc_version: String,
+    abi: cpuv_toolchain::AbiTuple,
+    packages: BTreeMap<String, String>,
+    upstream_lock: String,
 }
 
-fn parse_registry(text: &str) -> Result<Registry> {
-    // Serde flatten does not reject misspelled archive/recipe keys itself.
-    let document: toml::Value = toml::from_str(text)?;
-    let archive_keys = [
-        "url",
-        "sha256",
-        "archive",
-        "strip_components",
-        "include",
-        "exclude",
-    ];
-    for (section, specific) in [
-        (
-            "packages",
-            &[
-                "version",
-                "cmake",
-                "dependencies",
-                "requires_c",
-                "minimum_cxx",
-                "license_file",
-                "patches",
-                "interface",
-            ][..],
-        ),
-        ("tools", &["version", "executable"][..]),
-    ] {
-        if let Some(entries) = document.get(section).and_then(toml::Value::as_table) {
-            for (name, entry) in entries {
-                let fields = entry.as_table().context("Recipe must be a TOML table")?;
-                for key in fields.keys() {
-                    ensure!(
-                        archive_keys.contains(&key.as_str()) || specific.contains(&key.as_str()),
-                        "Unknown source registry key {section}.{name}.{key}"
-                    );
-                }
-            }
+pub fn requests_locked(root: &Path, manifest: &Manifest, requests: &[String]) -> bool {
+    let locked: Option<CatalogLock> = fs::read_to_string(root.join("cpuv.lock"))
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok());
+    locked.is_some_and(|lock| {
+        lock.version == 3
+            && lock.dependencies == manifest.dependencies
+            && requests.iter().all(|request| {
+                let (name, op, value) = cpuv_solver::split_requirement(request);
+                manifest.dependencies.get(name).is_some_and(|dependency| {
+                    dependency.version().is_ok_and(|constraint| {
+                        op.is_empty() || constraint == format!("{op}{value}")
+                    })
+                })
+            })
+    })
+}
+
+fn standard(tc: &Toolchain) -> Result<String> {
+    let value = tc
+        .observed_abi_options
+        .get("__cplusplus")
+        .context("GCC did not report its C++ language mode")?;
+    let year: u32 = value
+        .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+        .parse()?;
+    Ok(format!(
+        "{}{}",
+        if tc
+            .observed_abi_options
+            .get("__STRICT_ANSI__")
+            .is_some_and(|v| v != "not defined")
+        {
+            ""
+        } else {
+            "gnu"
+        },
+        if year >= 202400 {
+            26
+        } else if year >= 202302 {
+            23
+        } else if year >= 202002 {
+            20
+        } else if year >= 201703 {
+            17
+        } else if year >= 201402 {
+            14
+        } else if year >= 201103 {
+            11
+        } else {
+            98
         }
-    }
-    Ok(toml::from_str(text)?)
+    ))
 }
 
-fn registry(cli: &Cli) -> Result<Registry> {
-    let mut value = parse_registry(include_str!("../../../recipes.toml"))?;
-    if let Some(path) = &cli.recipes {
-        let text = fs::read_to_string(path).context("Reading source recipe registry")?;
-        let custom = parse_registry(&text).context("Invalid source recipe registry")?;
-        ensure!(
-            custom.schema == 1,
-            "Unsupported custom source registry schema"
-        );
-        value.packages.extend(custom.packages);
-        value.tools.extend(custom.tools);
-    }
+fn reference(name: &str, dependency: &Dependency) -> Result<String> {
     ensure!(
-        value.schema == 1,
-        "Unsupported source recipe registry schema"
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-.+".contains(&c)),
+        "Invalid catalog package name {name}; use the exact ConanCenter name"
     );
-    Ok(value)
+    let version = dependency.version()?;
+    ensure!(
+        version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".*_+-<>=:".contains(&c)),
+        "Invalid catalog version constraint"
+    );
+    Ok(format!(
+        "{name}/{}",
+        if version == "*" {
+            "[*]".into()
+        } else if version.starts_with(['<', '>']) {
+            format!("[{version}]")
+        } else {
+            version.trim_start_matches('=').to_owned()
+        }
+    ))
 }
 
-fn resolve(registry: &Registry, requirements: &[String]) -> Result<BTreeMap<String, Recipe>> {
-    let mut pending = requirements.to_vec();
-    let mut packages = BTreeMap::new();
-    while let Some(requirement) = pending.pop() {
-        let (name, operator, version) = cpuv_solver::split_requirement(&requirement);
-        ensure!(
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"-_.+".contains(&c)),
-            "Invalid source package name {name}"
-        );
-        let recipe = registry.packages.get(name).with_context(|| {
-            let similar = cpuv_solver::suggestions(name, registry.packages.keys().map(String::as_str));
-            format!("No source build recipe for {name}. {} Add a checked recipe with --recipes FILE; incompatible binaries will not be installed as a fallback",
-                if similar.is_empty() { "No similar recipe names were found.".into() }
-                else { format!("Similar recipes: {}.", similar.join(", ")) }
-            )
-        })?;
-        let order = cpuv_solver::version_cmp(&recipe.version, version);
-        use std::cmp::Ordering::*;
-        ensure!(
-            match operator {
-                "" => true,
-                "=" | "==" => order == Equal,
-                ">=" => order != Less,
-                "<=" => order != Greater,
-                ">" => order == Greater,
-                "<" => order == Less,
-                _ => false,
-            },
-            "Source recipe {name}@{} does not satisfy {operator}{version}",
-            recipe.version
-        );
-        if packages.insert(name.into(), recipe.clone()).is_none() {
-            pending.extend(recipe.dependencies.clone());
-        }
-        ensure!(packages.len() <= 4096, "Too many source dependencies");
-    }
-    Ok(packages)
-}
-
-fn order(packages: &BTreeMap<String, Recipe>) -> Result<Vec<String>> {
-    let mut ordered = Vec::new();
-    let mut done = BTreeSet::new();
-    while ordered.len() < packages.len() {
-        let mut changed = false;
-        for (name, recipe) in packages {
-            if done.contains(name) {
-                continue;
-            }
-            if recipe
-                .dependencies
-                .iter()
-                .all(|r| done.contains(cpuv_solver::split_requirement(r).0))
-            {
-                done.insert(name.clone());
-                ordered.push(name.clone());
-                changed = true;
-            }
-        }
-        ensure!(
-            changed,
-            "Source recipe dependency cycle or missing locked dependency"
-        );
-    }
-    Ok(ordered)
+fn command(executable: &Path, home: &Path, path: &std::ffi::OsStr) -> Command {
+    let mut value = Command::new(executable);
+    value
+        .env("CONAN_HOME", home)
+        .env("PATH", path)
+        .env_remove("CC")
+        .env_remove("CXX");
+    value
 }
 
 fn run(command: &mut Command, log: &Path) -> Result<()> {
     use std::io::Write;
-    let output = command.output().context("Running source build tool")?;
-    let mut file = OpenOptions::new().append(true).create(true).open(log)?;
-    writeln!(file, "command: {command:?}")?;
-    file.write_all(&output.stdout)?;
-    file.write_all(&output.stderr)?;
-    ensure!(
-        output.status.success(),
-        "Source build failed ({}). Log: {}\n{}\n{}",
-        output.status,
-        log.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let mut out = OpenOptions::new().create(true).append(true).open(log)?;
+    writeln!(out, "command: {command:?}")?;
+    let status = command
+        .stdout(out.try_clone()?)
+        .stderr(out)
+        .status()
+        .context("Starting the community package provider")?;
+    if !status.success() {
+        let text = fs::read_to_string(log)?;
+        let tail = text
+            .lines()
+            .rev()
+            .take(28)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "Community catalog install failed ({status}). Log: {}\n{tail}\nA package must exist in the catalog and support the selected compiler; cpuv does not guess missing build instructions",
+            log.display()
+        );
+    }
     Ok(())
 }
 
-fn compiler_path(tc: &Toolchain) -> Result<OsString> {
-    let mut paths = vec![tc.compiler_path.parent().unwrap().to_owned()];
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&path));
+fn configure_profile(tc: &Toolchain, profile: &Profile, key: &str, jobs: usize) -> Result<String> {
+    let arch = match tc.abi.arch.as_str() {
+        "x86_64" => "x86_64",
+        "x86" => "x86",
+        "aarch64" => "armv8",
+        value => bail!("Unsupported catalog architecture {value}"),
+    };
+    ensure!(
+        tc.abi.crt_runtime != "cygwin",
+        "The catalog GCC adapter currently supports native MinGW GCC, not Cygwin"
+    );
+    let c = tc.compiler_path.with_file_name(
+        tc.compiler_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace("g++", "gcc"),
+    );
+    ensure!(
+        c.is_file(),
+        "Catalog builds need the matching gcc next to g++"
+    );
+    let cpp: Vec<_> = profile.cpp.iter().chain(&profile.cxx).cloned().collect();
+    let cflags: Vec<_> = profile.cpp.iter().chain(&profile.c).cloned().collect();
+    let conf = BTreeMap::from([
+        (
+            "tools.build:compiler_executables",
+            serde_json::json!({"c":cpuv_relocate::portable(&c),"cpp":cpuv_relocate::portable(&tc.compiler_path)}),
+        ),
+        ("tools.build:cxxflags", serde_json::json!(cpp)),
+        ("tools.build:cflags", serde_json::json!(cflags)),
+        ("tools.build:exelinkflags", serde_json::json!(profile.link)),
+        (
+            "tools.build:sharedlinkflags",
+            serde_json::json!(profile.link),
+        ),
+        ("tools.build:jobs", serde_json::json!(jobs)),
+        (
+            "tools.cmake.cmaketoolchain:generator",
+            serde_json::json!("Ninja"),
+        ),
+        (
+            "tools.cmake.cmaketoolchain:extra_variables",
+            serde_json::json!({"CMAKE_CXX_FLAGS_RELEASE":"","CMAKE_C_FLAGS_RELEASE":""}),
+        ),
+        (
+            "tools.info.package_id:confs",
+            serde_json::json!(["user.cpuv:profile"]),
+        ),
+        ("user.cpuv:profile", serde_json::json!(key)),
+    ]);
+    let mut output = format!(
+        "[settings]\nos=Windows\narch={arch}\ncompiler=gcc\ncompiler.version={}\ncompiler.libcxx={}\ncompiler.cppstd={}\nbuild_type=Release\n[conf]\n",
+        tc.abi.compiler_abi_major,
+        if tc.abi.glibcxx_cxx11_abi == "0" {
+            "libstdc++"
+        } else {
+            "libstdc++11"
+        },
+        standard(tc)?
+    );
+    for (name, value) in conf {
+        let encoded = match value {
+            serde_json::Value::String(value) => value,
+            value => serde_json::to_string(&value)?,
+        };
+        ensure!(
+            !encoded.contains(['\n', '\r']),
+            "Invalid newline in catalog build profile"
+        );
+        output.push_str(&format!("{name}={encoded}\n"));
     }
-    Ok(std::env::join_paths(paths)?)
+    Ok(output)
 }
 
-fn c_compiler(tc: &Toolchain) -> Result<PathBuf> {
-    let file = tc
-        .compiler_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .replace("g++", "gcc");
-    let path = tc.compiler_path.with_file_name(file);
-    ensure!(
-        path.is_file(),
-        "Recipe needs the matching C compiler next to {}",
-        tc.compiler_path.display()
-    );
-    let target = Command::new(&path)
-        .arg("-dumpmachine")
-        .env("PATH", compiler_path(tc)?)
-        .output()?;
-    ensure!(
-        target.status.success()
-            && String::from_utf8_lossy(&target.stdout).trim() == tc.abi.target_triple,
-        "C and C++ compilers target different architectures"
-    );
-    Ok(path)
-}
-
-async fn built_environment(
-    cache: &Path,
-    locked: &SourceLock,
-    registry: &Registry,
-    cli: &Cli,
-    standard: &str,
-) -> Result<(PathBuf, Installed, bool)> {
-    let base = cache.join("source");
-    let builds = base.join("builds");
-    fs::create_dir_all(&builds)?;
-    fs::create_dir_all(base.join("locks"))?;
-    let guard = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(base.join("locks").join(&locked.cache_key))?;
-    guard
-        .try_lock_exclusive()
-        .context("Another process is building this source profile; retry after it completes")?;
-    let final_root = builds.join(&locked.cache_key);
-    if final_root.join("installed.json").is_file() {
-        let installed: Installed =
-            serde_json::from_slice(&fs::read(final_root.join("installed.json"))?)?;
-        archive::verify(&final_root.join("prefix"), &installed.files)?;
-        return Ok((final_root.join("prefix"), installed, true));
-    }
-    ensure!(
-        !final_root.exists(),
-        "Incomplete source cache entry: use a fresh --cache-dir"
-    );
-    let work = tempfile::Builder::new()
-        .prefix("build-")
-        .tempdir_in(&builds)?;
-    let prefix = work.path().join("prefix");
-    for dir in ["include", "lib", "bin"] {
-        fs::create_dir_all(prefix.join(dir))?;
-    }
-    let tc = &locked.compiler;
-    let limits = cli.transfer_limits();
-    let build_path = std::env::join_paths(
-        std::iter::once(prefix.join("bin")).chain(std::env::split_paths(&compiler_path(tc)?)),
-    )?;
-    let mut ownership = BTreeMap::new();
-    let mut files = BTreeMap::new();
-    if !locked.packages.is_empty() {
-        let prepared = tools::prepare(registry, &base, cli.offline, &limits).await?;
-        let archives: BTreeMap<String, PathBuf> =
-            stream::iter(locked.packages.iter().map(|(name, recipe)| {
-                let archive_cache = base.join("archives");
-                let limits = &limits;
-                async move {
-                    Ok::<_, anyhow::Error>((
-                        name.clone(),
-                        archive::download(&archive_cache, &recipe.source, cli.offline, limits)
-                            .await?,
-                    ))
-                }
-            }))
-            .buffer_unordered(cli.concurrent_downloads as usize)
-            .try_collect()
-            .await?;
-        let source_root = work.path().join("sources");
-        let output_root = work.path().join("build");
-        let persistent_logs = base.join("logs").join(&locked.cache_key);
-        fs::create_dir_all(&persistent_logs)?;
-        let jobs = cli
-            .build_jobs
-            .map(usize::from)
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
-        for name in order(&locked.packages)? {
-            let recipe = &locked.packages[&name];
-            let source = source_root.join(&name);
-            let output = output_root.join(&name);
-            archive::extract(&archives[&name], &recipe.source, &source, &limits)?;
-            for patch in &recipe.patches {
-                let path = source.join(cpuv_store::safe_relative(Path::new(&patch.file))?);
-                ensure!(
-                    fs::metadata(&path)?.len() <= 10 * 1024 * 1024,
-                    "Recipe patch target is too large"
-                );
-                let text = fs::read_to_string(&path)?;
-                ensure!(
-                    !patch.find.is_empty() && text.matches(&patch.find).count() == 1,
-                    "Recipe patch for {name}/{} does not match its pinned source exactly once",
-                    patch.file
-                );
-                fs::write(path, text.replacen(&patch.find, &patch.replace, 1))?;
-            }
-            ensure!(
-                source.join("CMakeLists.txt").is_file(),
-                "Source recipe {name} has no CMakeLists.txt"
-            );
-            ensure!(
-                recipe
-                    .cmake
-                    .iter()
-                    .all(|argument| argument.starts_with("-D")
-                        && ![
-                            "CMAKE_CXX_COMPILER",
-                            "CMAKE_C_COMPILER",
-                            "CMAKE_TOOLCHAIN_FILE",
-                            "CMAKE_INSTALL_PREFIX",
-                            "CMAKE_MAKE_PROGRAM",
-                            "CMAKE_CXX_FLAGS",
-                            "CMAKE_C_FLAGS",
-                            "CMAKE_EXE_LINKER_FLAGS",
-                            "CMAKE_SHARED_LINKER_FLAGS",
-                            "CMAKE_SYSTEM_NAME",
-                            "CMAKE_SYSTEM_PROCESSOR",
-                            "CMAKE_GENERATOR",
-                            "CMAKE_INSTALL_LIBDIR",
-                            "CMAKE_PREFIX_PATH"
-                        ]
+fn modules_for(node: &serde_json::Value, name: &str) -> Vec<String> {
+    let mut modules = vec![
+        node["cpp_info"]["root"]["properties"]["pkg_config_name"]
+            .as_str()
+            .unwrap_or(name)
+            .to_owned(),
+    ];
+    if let Some(parts) = node["cpp_info"].as_object() {
+        for (component, info) in parts {
+            if let Some(aliases) = info["properties"]["pkg_config_aliases"].as_array() {
+                modules.extend(
+                    aliases
                         .iter()
-                        .any(|key| argument[2..].starts_with(key))),
-                "Recipe {name} overrides the compiler/profile; move those choices into the source build environment"
-            );
-            if recipe.minimum_cxx >= 11 {
-                let actual = cxx_level(tc);
-                ensure!(
-                    (11..=26).contains(&actual) && actual >= recipe.minimum_cxx,
-                    "Recipe {name} requires C++{}; choose a compatible project standard/compiler or an older recipe",
-                    recipe.minimum_cxx
+                        .filter_map(|alias| alias.as_str().map(str::to_owned)),
                 );
             }
-            let log = persistent_logs.join(format!("{name}.log"));
-            eprintln!(
-                "Building {name} {} with GCC {} ({})",
-                recipe.version,
-                tc.gcc_version,
-                tc.runtime_tag()
-            );
-            let mut configure = Command::new(&prepared.cmake);
-            configure
-                .args(["-S"])
-                .arg(&source)
-                .arg("-B")
-                .arg(&output)
-                .args(["-G", "Ninja"])
-                .arg(format!(
-                    "-DCMAKE_MAKE_PROGRAM={}",
-                    cpuv_relocate::portable(&prepared.ninja)
-                ))
-                .arg(format!(
-                    "-DCMAKE_CXX_COMPILER={}",
-                    cpuv_relocate::portable(&tc.compiler_path)
-                ))
-                .arg(format!(
-                    "-DCMAKE_INSTALL_PREFIX={}",
-                    cpuv_relocate::portable(&prefix)
-                ))
-                .arg(format!(
-                    "-DCMAKE_PREFIX_PATH={}",
-                    cpuv_relocate::portable(&prefix)
-                ))
-                .arg(format!(
-                    "-DCMAKE_CXX_FLAGS={}",
-                    joined(
-                        locked
-                            .profile
-                            .compiler_flags(standard)
-                            .into_iter()
-                            .map(|s| s.to_string_lossy().into_owned())
-                    )
-                ))
-                .arg(format!(
-                    "-DCMAKE_C_FLAGS={}",
-                    joined(locked.profile.cpp.iter().chain(&locked.profile.c).cloned())
-                ))
-                .arg(format!(
-                    "-DCMAKE_EXE_LINKER_FLAGS={}",
-                    joined(locked.profile.link.iter().cloned())
-                ))
-                .arg(format!(
-                    "-DCMAKE_SHARED_LINKER_FLAGS={}",
-                    joined(locked.profile.link.iter().cloned())
-                ))
-                .args([
-                    "-DCMAKE_BUILD_TYPE=Release",
-                    "-DCMAKE_CXX_FLAGS_RELEASE=",
-                    "-DCMAKE_C_FLAGS_RELEASE=",
-                    "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=",
-                    "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=",
-                    "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
-                    "-DCMAKE_INSTALL_LIBDIR=lib",
-                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-                    "-DBUILD_TESTING=OFF",
-                    "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
-                    "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
-                    "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF",
-                ])
-                .args(&recipe.cmake)
-                .env("PATH", &build_path)
-                .env_remove("CMAKE_PREFIX_PATH")
-                .env_remove("CC")
-                .env_remove("CXX");
-            if recipe.requires_c {
-                configure.arg(format!(
-                    "-DCMAKE_C_COMPILER={}",
-                    cpuv_relocate::portable(&c_compiler(tc)?)
-                ));
+            if component != "root" {
+                modules.push(
+                    info["properties"]["pkg_config_name"]
+                        .as_str()
+                        .map_or_else(|| format!("{name}-{component}"), str::to_owned),
+                );
             }
-            if tc.abi.crt_runtime == "cygwin" {
-                configure.arg("-DCMAKE_SYSTEM_NAME=CYGWIN");
-            }
-            run(&mut configure, &log)?;
-            run(
-                Command::new(&prepared.cmake)
-                    .arg("--build")
-                    .arg(&output)
-                    .arg("--parallel")
-                    .arg(jobs.to_string())
-                    .env("PATH", &build_path),
-                &log,
-            )?;
-            run(
-                Command::new(&prepared.cmake)
-                    .arg("--install")
-                    .arg(&output)
-                    .env("PATH", &build_path),
-                &log,
-            )?;
-            if let Some(interface) = &recipe.interface {
-                ensure!(
-                    !interface.module.is_empty()
-                        && interface
-                            .module
-                            .bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"-_.+".contains(&c)),
-                    "Invalid recipe interface module name"
-                );
-                let module_file = format!("{}.pc", interface.module);
-                let mut previous_modules = Vec::new();
-                for entry in walkdir::WalkDir::new(&prefix) {
-                    let entry = entry?;
-                    if entry.file_type().is_file()
-                        && entry.file_name().to_string_lossy() == module_file
-                    {
-                        let relative = cpuv_relocate::portable(entry.path().strip_prefix(&prefix)?);
-                        ensure!(
-                            !files.contains_key(&relative),
-                            "Recipe interface {} would replace another package's module",
-                            interface.module
-                        );
-                        previous_modules.push(entry.path().to_owned());
-                    }
-                }
-                for path in previous_modules {
-                    fs::remove_file(path)?;
-                }
-                let libraries = interface
-                    .libraries_by_runtime
-                    .get(&tc.abi.crt_runtime)
-                    .unwrap_or(&interface.libraries);
-                ensure!(
-                    libraries.iter().all(|s| !s.is_empty()
-                        && s.bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"-_.+".contains(&c))),
-                    "Invalid recipe interface library name"
-                );
-                ensure!(
-                    interface.cflags.iter().all(|s| !s.contains(['\n', '\r'])),
-                    "Recipe interface flags contain a newline"
-                );
-                let directory = prefix.join("lib/pkgconfig");
-                fs::create_dir_all(&directory)?;
-                let text = format!(
-                    "prefix={}\nlibdir=${{prefix}}/lib\nincludedir=${{prefix}}/include\nName: {}\nDescription: cpuv recipe public interface\nVersion: {}\nRequires: {}\nLibs: -L${{libdir}} {}\nCflags: -I${{includedir}} {}\n",
-                    cpuv_relocate::portable(&prefix),
-                    interface.module,
-                    recipe.version,
-                    interface.requires.join(", "),
-                    libraries
-                        .iter()
-                        .map(|name| format!("-l{name}"))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    interface.cflags.join(" ")
-                );
-                fs::write(directory.join(format!("{}.pc", interface.module)), text)?;
-            }
-            let license = cpuv_store::safe_relative(Path::new(&recipe.license_file))?;
-            let destination = prefix.join("share/licenses").join(&name).join("LICENSE");
-            fs::create_dir_all(destination.parent().unwrap())?;
-            fs::copy(source.join(license), &destination)
-                .context("Preserving upstream source license")?;
-            let current = archive::inventory(&prefix)?;
-            ensure!(
-                files
-                    .iter()
-                    .all(|(path, hash)| current.get(path) == Some(hash)),
-                "Recipe {name} overwrote another package's installed files"
-            );
-            let owned: Vec<PathBuf> = current
-                .keys()
-                .filter(|path| !files.contains_key(*path))
-                .map(PathBuf::from)
-                .collect();
-            ownership.insert(name, owned);
-            files = current;
         }
     }
-    let installed = Installed {
-        original_prefix: cpuv_relocate::portable(&prefix),
-        files,
-        ownership,
-    };
-    fs::write(
-        work.path().join("installed.json"),
-        serde_json::to_vec_pretty(&installed)?,
-    )?;
-    fs::rename(work.path(), &final_root)?;
-    Ok((final_root.join("prefix"), installed, false))
+    modules.retain(|module| module != "none");
+    modules.sort();
+    modules.dedup();
+    modules
 }
 
-fn stage_environment(
-    cached: &Path,
-    installed: &Installed,
-    stage: &Path,
+fn prepare_metadata(
+    env: &Path,
     final_env: &Path,
     manifest: &Manifest,
-    locked: &SourceLock,
-) -> Result<()> {
-    for dir in ["include", "lib", "bin"] {
-        fs::create_dir_all(stage.join(dir))?;
-    }
-    for relative in installed.files.keys() {
-        let path = cpuv_store::safe_relative(Path::new(relative))?;
-        cpuv_store::link_or_copy(&cached.join(&path), &stage.join(&path))?;
-    }
-    // Installed metadata is private to a project; never edit cached hardlinks.
-    for relative in installed.files.keys() {
-        let path = stage.join(relative);
-        let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if ["pc", "cmake"].contains(&extension) {
-            let text = fs::read_to_string(&path)?;
-            let replacement = if extension == "pc" {
-                "${prefix}".into()
-            } else {
-                cpuv_relocate::portable(final_env)
-            };
-            let updated = text
-                .replace(&installed.original_prefix, &replacement)
-                .replace(&installed.original_prefix.replace('/', "\\"), &replacement);
-            fs::remove_file(&path)?;
-            fs::write(&path, updated)?;
+    tc: &Toolchain,
+    profile: &Profile,
+    graph: &serde_json::Value,
+) -> Result<BTreeMap<String, String>> {
+    let mut metadata = cpuv_relocate::Environment {
+        schema: 1,
+        compiler: tc.compiler_path.clone(),
+        compiler_bin: tc.compiler_path.parent().unwrap().to_owned(),
+        abi_hash: tc.abi_hash.clone(),
+        standard: manifest.project.std.clone(),
+        include_dirs: vec![],
+        libraries: vec![],
+        defines: vec![],
+        cflags: vec![],
+        include_map: BTreeMap::new(),
+        link_model: 2,
+        link_flags: vec![],
+        library_dirs: vec![],
+        managed_binaries: false,
+        dependency_origin: "source".into(),
+        source_arch: tc.abi.arch.clone(),
+        source_flags: profile.cpp.iter().chain(&profile.cxx).cloned().collect(),
+    };
+    let nodes = graph["graph"]["nodes"]
+        .as_object()
+        .context("Catalog returned no dependency graph")?;
+    let mut packages = Vec::new();
+    let mut versions = BTreeMap::new();
+    let mut owned_modules = BTreeSet::new();
+    let stage_path = cpuv_relocate::portable(env);
+    for node in nodes
+        .values()
+        .filter(|n| n["context"] == "host" && n["package_folder"].is_string())
+    {
+        let reference = node["ref"]
+            .as_str()
+            .context("Catalog package has no reference")?;
+        let (name, version) = reference
+            .split_once('/')
+            .context("Malformed catalog reference")?;
+        versions.insert(
+            name.to_owned(),
+            version.split('#').next().unwrap().to_owned(),
+        );
+        let folder = Path::new(node["package_folder"].as_str().unwrap());
+        ensure!(
+            folder.canonicalize()?.starts_with(env.canonicalize()?),
+            "Catalog deployment escapes staged environment"
+        );
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(folder) {
+            let entry = entry?;
+            ensure!(
+                !entry.file_type().is_symlink(),
+                "Catalog deployment contains a symlink"
+            );
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "dll") {
+                    let destination = env.join("bin").join(path.file_name().unwrap());
+                    if destination.exists() {
+                        ensure!(
+                            archive::digest(&destination)? == archive::digest(path)?,
+                            "Conflicting catalog runtime DLL {}",
+                            path.display()
+                        );
+                    } else {
+                        fs::copy(path, destination)?;
+                    }
+                }
+                if !path.extension().is_some_and(|ext| ext == "pc") {
+                    files.push(path.strip_prefix(env)?.to_owned());
+                }
+            }
         }
-    }
-    let tc = &locked.compiler;
-    let mut metadata = cpuv_relocate::index_environment(
-        stage,
-        final_env,
-        tc.compiler_path.clone(),
-        tc.abi_hash.clone(),
-        manifest.project.std.clone(),
-    )?;
-    let packages: Vec<_> = installed
-        .ownership
-        .iter()
-        .map(|(name, files)| cpuv_relocate::linking::PackageFiles {
+        for module in modules_for(node, name) {
+            ensure!(
+                !module.contains(['/', '\\', ':']),
+                "Unsafe catalog module name"
+            );
+            let pc = env.join(format!("{module}.pc"));
+            if pc.is_file() {
+                ensure!(
+                    owned_modules.insert(module.clone()),
+                    "Duplicate catalog module {module}"
+                );
+                let text = fs::read_to_string(&pc)?
+                    .replace(&stage_path, "${pcfiledir}")
+                    .replace(&env.to_string_lossy().to_string(), "${pcfiledir}");
+                fs::write(&pc, text)?;
+                files.push(PathBuf::from(format!("{module}.pc")));
+            }
+        }
+        packages.push(cpuv_relocate::linking::PackageFiles {
             name: cpuv_solver::normalize(name),
-            files: files.clone(),
-        })
-        .collect();
+            files,
+        });
+    }
     cpuv_relocate::linking::apply(
-        stage,
+        env,
         &mut metadata,
         &packages,
         &requirements(manifest)?,
         &manifest.link,
     )?;
     metadata.dependency_origin = "source".into();
-    metadata.source_arch = tc.abi.arch.clone();
-    metadata.source_flags = locked
-        .profile
-        .cpp
-        .iter()
-        .chain(&locked.profile.cxx)
-        .cloned()
-        .collect();
-    metadata.cflags.extend(
-        locked
-            .profile
-            .cpp
-            .iter()
-            .chain(&locked.profile.cxx)
-            .cloned(),
-    );
-    metadata.link_flags.extend(locked.profile.link.clone());
+    metadata
+        .cflags
+        .extend(profile.cpp.iter().chain(&profile.cxx).cloned());
+    metadata.link_flags.extend(profile.link.clone());
     cpuv_relocate::validate_profile(&metadata, &[])?;
-    for define in &metadata.defines {
-        if let Some(value) = define.strip_prefix("_GLIBCXX_USE_CXX11_ABI=") {
-            ensure!(
-                value == tc.abi.glibcxx_cxx11_abi,
-                "Source public interface requests dual ABI {value}, but dependencies were built with {}; change the source profile and rebuild",
-                tc.abi.glibcxx_cxx11_abi
-            );
-        }
-        if define.starts_with("_GLIBCXX_DEBUG") {
-            ensure!(
-                tc.observed_abi_options
-                    .get("_GLIBCXX_DEBUG")
-                    .is_some_and(|value| value != "not defined"),
-                "Source public interface requests libstdc++ debug mode absent from the build profile"
-            );
-        }
-    }
-    let mut inspection =
-        cpuv_relocate::inspect::environment_with_runtime_policy(stage, &tc.abi.arch, false)?;
-    inspection["dependency_origin"] = serde_json::json!(
-        "built from source with the selected compiler/profile; no universal ABI proof"
-    );
-    inspection["compiler"] = serde_json::to_value(tc)?;
+    let inspection =
+        cpuv_relocate::inspect::environment_with_runtime_policy(env, &tc.abi.arch, false)?;
     fs::write(
-        stage.join("compatibility.json"),
+        env.join("compatibility.json"),
         serde_json::to_vec_pretty(&inspection)?,
     )?;
     fs::write(
-        stage.join("manifest.json"),
+        env.join("manifest.json"),
         serde_json::to_vec_pretty(&metadata)?,
     )?;
     fs::write(
-        stage.join("cpuv.specs"),
-        "*cc1plus:\n+ %ecpuv source profiles require the compiler shim\n\n",
+        env.join("cpuv.specs"),
+        "*cc1plus:\n+ %ecpuv catalog profiles require the compiler shim\n\n",
     )?;
-    fs::write(
-        stage.join("source-profile.json"),
-        serde_json::to_vec_pretty(locked)?,
-    )?;
-    Ok(())
+    // Conan's generated CMake files and graph are local diagnostics. Keep their
+    // references valid after the staged environment is committed.
+    for entry in walkdir::WalkDir::new(env) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "cmake")
+        {
+            let text = fs::read_to_string(entry.path())?;
+            fs::write(
+                entry.path(),
+                text.replace(&stage_path, &cpuv_relocate::portable(final_env))
+                    .replace(
+                        &env.to_string_lossy().to_string(),
+                        &final_env.to_string_lossy(),
+                    ),
+            )?;
+        }
+    }
+    Ok(versions)
 }
 
 pub async fn sync(
@@ -890,107 +510,246 @@ pub async fn sync(
     refresh: bool,
 ) -> Result<()> {
     let started = Instant::now();
-    let old: Option<ProjectLock> = fs::read_to_string(root.join("cpuv.lock"))
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok());
-    let reuse_lock = !refresh
-        && old.as_ref().is_some_and(|locked| {
-            locked.dependencies == manifest.dependencies
-                && locked.version == 2
-                && locked.backend == "source"
-        });
-    let registry = if reuse_lock {
-        let old = old.as_ref().unwrap();
-        Registry {
-            schema: 1,
-            packages: old.packages.clone(),
-            tools: old.tools.clone(),
-        }
-    } else {
-        registry(cli)?
+    let old_text = match fs::read_to_string(root.join("cpuv.lock")) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("Reading cpuv.lock"),
     };
-    let packages = resolve(&registry, &requirements(manifest)?)?;
-    order(&packages)?;
-    let mut profile = Profile::environment(if cli.reset_profile {
+    #[derive(Deserialize)]
+    struct SavedProfile {
+        version: u32,
+        #[serde(default)]
+        profile: Profile,
+    }
+    let saved: Option<SavedProfile> = old_text
+        .as_deref()
+        .map(toml::from_str)
+        .transpose()
+        .context("Invalid cpuv.lock")?;
+    ensure!(
+        saved
+            .as_ref()
+            .is_none_or(|lock| (1..=3).contains(&lock.version)),
+        "Unsupported cpuv.lock version"
+    );
+    let old: Option<CatalogLock> = if saved.as_ref().is_some_and(|lock| lock.version == 3) {
+        Some(toml::from_str(old_text.as_deref().unwrap()).context("Invalid catalog lock")?)
+    } else {
+        None
+    };
+    let profile = Profile::environment(if cli.reset_profile {
         None
     } else {
-        old.as_ref().map(|lock| &lock.profile)
+        saved.as_ref().map(|value| &value.profile)
     })?;
-    let required_cxx = packages
-        .values()
-        .map(|recipe| recipe.minimum_cxx)
-        .filter(|value| *value >= 11)
-        .max()
-        .unwrap_or(0);
-    if manifest.project.std == "default"
-        && required_cxx > 0
-        && !profile
-            .cpp
-            .iter()
-            .chain(&profile.cxx)
-            .any(|flag| flag.starts_with("-std="))
-        && (cxx_level(base_tc) == 98 || cxx_level(base_tc) < required_cxx)
-    {
-        profile.cxx.push(format!("-std=gnu++{required_cxx}"));
-    }
-    let compiler_flags = profile.compiler_flags(&manifest.project.std);
-    let tc = cpuv_toolchain::probe_with_flags(Some(&base_tc.compiler_path), &compiler_flags)?;
-    let compiler_sha256 = archive::digest(&tc.compiler_path)?;
-    let context = serde_json::to_vec(&(
-        3,
-        &packages,
-        &registry.tools,
-        &profile,
+    let flags = profile.compiler_flags(&manifest.project.std);
+    let tc = cpuv_toolchain::probe_with_flags(Some(&base_tc.compiler_path), &flags)?;
+    let mut doctor_flags = flags.clone();
+    doctor_flags.extend(profile.link.iter().map(OsString::from));
+    cpuv_toolchain::doctor(&tc, &doctor_flags)?;
+    let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
+    let base = cache_dir(cli)?.join("catalog");
+    fs::create_dir_all(&base)?;
+    let key = blake3::hash(&serde_json::to_vec(&(
+        1,
         &tc,
-        &compiler_sha256,
+        &profile,
         &manifest.project.std,
-    ))?;
-    let cache_key = blake3::hash(&context).to_hex().to_string();
-    let locked = SourceLock {
-        version: 2,
-        backend: "source".into(),
-        dependencies: manifest.dependencies.clone(),
-        packages,
-        tools: registry.tools.clone(),
-        profile,
-        compiler: tc,
-        compiler_sha256,
-        cache_key,
-    };
-    let mut doctor_flags = compiler_flags;
-    doctor_flags.extend(locked.profile.link.iter().map(OsString::from));
-    cpuv_toolchain::doctor(&locked.compiler, &doctor_flags)?;
-    let cache = cache_dir(cli)?;
-    let (cached, installed, reused) =
-        built_environment(&cache, &locked, &registry, cli, &manifest.project.std).await?;
+        archive::digest(&tc.compiler_path)?,
+    ))?)
+    .to_hex()
+    .to_string();
+    let home = base.join("homes").join(&key);
+    fs::create_dir_all(&home)?;
+    let guard = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join("cpuv.lock"))?;
+    guard.try_lock_exclusive().context(
+        "Another catalog operation is using this compiler/profile; retry when it finishes",
+    )?;
+    let tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
+    let mut paths = vec![
+        tc.compiler_path.parent().unwrap().to_owned(),
+        tools.cmake.parent().unwrap().to_owned(),
+        tools.ninja.parent().unwrap().to_owned(),
+    ];
+    if let Some(host) = cpuv_relocate::msys_host_bin(tc.compiler_path.parent().unwrap()) {
+        paths.push(host);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    let path = std::env::join_paths(paths)?;
+    let jobs = cli
+        .build_jobs
+        .map(usize::from)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    let profile_path = home.join("cpuv-profile");
+    fs::write(&profile_path, configure_profile(&tc, &profile, &key, jobs)?)?;
     let stage = tempfile::Builder::new()
-        .prefix("stage-source-")
+        .prefix("stage-catalog-")
         .tempdir_in(root.join(".cpuv"))?;
-    stage_environment(
-        &cached,
-        &installed,
-        &stage.path().join("env"),
+    let env = stage.path().join("env");
+    fs::create_dir_all(env.join("bin"))?;
+    let graph_file = stage.path().join("graph.json");
+    let upstream_lock = stage.path().join("conan.lock");
+    let input_lock = stage.path().join("input.lock");
+    let use_lock = !refresh
+        && old
+            .as_ref()
+            .is_some_and(|lock| lock.version == 3 && lock.dependencies == manifest.dependencies);
+    if use_lock {
+        fs::write(&input_lock, &old.as_ref().unwrap().upstream_lock)?;
+    }
+    let log_dir = base.join("logs");
+    fs::create_dir_all(&log_dir)?;
+    let log = log_dir.join(format!(
+        "{}-{}.log",
+        std::process::id(),
+        started.elapsed().as_nanos()
+    ));
+    let mut install = command(&tools.conan, &home, &path);
+    // Validate provider manifests before executing cached recipes or deploying
+    // cached binaries. Conan owns its package cache and its manifest format.
+    run(
+        command(&tools.conan, &home, &path).args(["cache", "check-integrity", "*:*", "-vwarning"]),
+        &log,
+    )?;
+    install
+        .args(["install", "-pr:h"])
+        .arg(&profile_path)
+        .arg("-pr:b")
+        .arg(&profile_path)
+        .arg(if cli.from_source {
+            "--build=*"
+        } else {
+            "--build=missing"
+        })
+        .args(["-g", "PkgConfigDeps", "-d", "full_deploy", "-of"])
+        .arg(&env)
+        .args(["--format=json", "--out-file"])
+        .arg(&graph_file)
+        .arg("--lockfile-out")
+        .arg(&upstream_lock)
+        .args([
+            "-cc",
+            &format!("core.download:parallel={}", cli.concurrent_downloads),
+            "-cc",
+            "core:non_interactive=True",
+        ])
+        .current_dir(stage.path());
+    if use_lock {
+        install.arg("--lockfile").arg(&input_lock);
+    } else {
+        install.arg("--lockfile=");
+    }
+    if cli.offline {
+        install.arg("--no-remote");
+    }
+    if refresh && !cli.offline {
+        install.arg("--update");
+    }
+    for (name, dependency) in &manifest.dependencies {
+        install.arg(format!("--requires={}", reference(name, dependency)?));
+    }
+    if manifest.dependencies.is_empty() {
+        fs::write(stage.path().join("conanfile.txt"), "[requires]\n")?;
+        install.arg(stage.path().join("conanfile.txt"));
+    }
+    eprintln!(
+        "Resolving through ConanCenter using GCC {} ({}). Build log: {}",
+        tc.gcc_version,
+        tc.runtime_tag(),
+        log.display()
+    );
+    run(&mut install, &log)?;
+    run(
+        command(&tools.conan, &home, &path).args(["cache", "check-integrity", "*:*", "-vwarning"]),
+        &log,
+    )?;
+    let graph: serde_json::Value = serde_json::from_slice(&fs::read(&graph_file)?)?;
+    let versions = prepare_metadata(
+        &env,
         &root.join(".cpuv/env"),
         manifest,
-        &locked,
+        &tc,
+        &profile,
+        &graph,
     )?;
+    let locked = CatalogLock {
+        version: 3,
+        backend: "conan".into(),
+        dependencies: manifest.dependencies.clone(),
+        profile,
+        gcc_version: tc.gcc_version.clone(),
+        abi: tc.abi.clone(),
+        packages: versions,
+        upstream_lock: fs::read_to_string(upstream_lock)?,
+    };
+    fs::write(
+        env.join("catalog-profile.json"),
+        serde_json::to_vec_pretty(
+            &serde_json::json!({"compiler":tc,"cache_key":key,"graph":graph}),
+        )?,
+    )?;
+    let inventory = archive::inventory(&env)?;
+    archive::verify(&env, &inventory)?;
+    fs::write(
+        env.join("catalog-files.json"),
+        serde_json::to_vec_pretty(&inventory)?,
+    )?;
+    let mut manifest = manifest.clone();
+    manifest.backend = Backend::Conan;
+    manifest.toolchain = PinnedToolchain {
+        target: tc.abi.target_triple.clone(),
+        compiler: format!("gcc@{}", tc.gcc_version),
+        abi: tc.runtime_tag(),
+    };
     fs::write(
         stage.path().join("cpuv.toml"),
-        toml::to_string_pretty(manifest)?,
+        toml::to_string_pretty(&manifest)?,
     )?;
     fs::write(
         stage.path().join("cpuv.lock"),
-        toml::to_string_pretty(&ProjectLock::from(&locked))?,
+        toml::to_string_pretty(&locked)?,
     )?;
     fs::write(
         stage.path().join("toolchain.json"),
-        serde_json::to_vec_pretty(&locked.compiler)?,
+        serde_json::to_vec_pretty(&tc)?,
     )?;
-    fs::write(
-        stage.path().join("activate.ps1"),
-        activation(root, &locked.compiler)?,
-    )?;
+    fs::write(stage.path().join("activate.ps1"), activation(root, &tc)?)?;
     install_shim(root)?;
+    commit(root, stage)?;
+    fs::write(
+        root.join(".cpuv/last-sync.json"),
+        serde_json::to_vec_pretty(
+            &serde_json::json!({"backend":"conan","packages":locked.packages.len(),"total_ms":started.elapsed().as_secs_f64()*1000.0}),
+        )?,
+    )?;
+    eprintln!(
+        "Ready from community catalog: {} packages",
+        locked.packages.len()
+    );
+    Ok(())
+}
+
+pub fn info(root: &Path) -> Result<()> {
+    let lock: CatalogLock = toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)
+        .context("Legacy source lock; run cpuv sync to migrate to the community catalog")?;
+    println!(
+        "Backend: ConanCenter\nCompiler recorded by lock: GCC {}",
+        lock.gcc_version
+    );
+    for (name, version) in lock.packages {
+        println!("{name} {version}");
+    }
+    Ok(())
+}
+
+fn commit(root: &Path, stage: tempfile::TempDir) -> Result<()> {
     let targets = [
         (".cpuv/env", "env"),
         ("cpuv.toml", "cpuv.toml"),
@@ -1038,39 +797,12 @@ pub async fn sync(
         if !recovery_errors.is_empty() {
             let recovery = stage.keep();
             bail!(
-                "Source update failed: {error:#}. Automatic restoration was incomplete: {}. Preserved backups: {}",
+                "Catalog update failed: {error:#}. Automatic restoration was incomplete: {}. Preserved backups: {}",
                 recovery_errors.join("; "),
                 recovery.display()
             );
         }
         return Err(error);
-    }
-    fs::write(
-        root.join(".cpuv/last-sync.json"),
-        serde_json::to_vec_pretty(
-            &serde_json::json!({"backend":"source","packages":locked.packages.len(),"compiled_cache_reused":reused,"cache_key":locked.cache_key,"total_ms":started.elapsed().as_secs_f64()*1000.0}),
-        )?,
-    )?;
-    eprintln!(
-        "Ready from source: {} packages; compiled cache {}; {:.0} ms",
-        locked.packages.len(),
-        if reused { "hit" } else { "built" },
-        started.elapsed().as_secs_f64() * 1000.0
-    );
-    Ok(())
-}
-
-pub fn info(root: &Path) -> Result<()> {
-    let lock: ProjectLock = toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)?;
-    println!(
-        "Backend: source\nCompiler recorded by lock: GCC {}\nTarget recorded by lock: {}",
-        lock.gcc_version,
-        lock.abi
-            .as_ref()
-            .map_or("not recorded", |abi| abi.target_triple.as_str())
-    );
-    for (name, recipe) in lock.packages {
-        println!("{name} {} (built from source)", recipe.version);
     }
     Ok(())
 }

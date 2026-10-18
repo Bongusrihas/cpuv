@@ -1,0 +1,1143 @@
+{
+  "verified_date": "2026-10-17",
+  "application_version": "0.0.2",
+  "git_base": "4889f1f96c527e45224b817be4aa4e0d8f5d0e17",
+  "scope": "post-rm-feature baseline; prior catalog work is uncommitted",
+  "files": {
+    ".cargo/config.toml": {
+      "lines": 3,
+      "bytes": 159,
+      "sha256": "48dc7665d339d3d126ba60f514500586de6983187ee780bbb901b0e2a703104b",
+      "symbols": []
+    },
+    ".gitattributes": {
+      "lines": 7,
+      "bytes": 120,
+      "sha256": "7d82f885fbe2e6578ea3c7c187b56b7c4cc4c8062fa6e68f6b2ee78806603402",
+      "symbols": []
+    },
+    ".github/workflows/ci.yml": {
+      "lines": 30,
+      "bytes": 758,
+      "sha256": "a77a0424157121d45d21cf3dbced0685cbc319f32d3b33c8ebfce1a181d1acde",
+      "symbols": []
+    },
+    ".github/workflows/release.yml": {
+      "lines": 66,
+      "bytes": 2330,
+      "sha256": "2f02b04d60cb72929dbac564f3fabc37e3f8a9e3610940e46c23d6f1bbb95b7c",
+      "symbols": []
+    },
+    ".gitignore": {
+      "lines": 5,
+      "bytes": 39,
+      "sha256": "3b3a682f39358c1b775777a092670f8f2dc3df66957bc48e98d6663c0f6233ae",
+      "symbols": []
+    },
+    "AUTHORS.md": {
+      "lines": 9,
+      "bytes": 243,
+      "sha256": "332478e8640d7d062db2b443030e8e633db1abde86dfe6bbf60f06d6d780ecf7",
+      "symbols": []
+    },
+    "CHANGELOG.md": {
+      "lines": 32,
+      "bytes": 2794,
+      "sha256": "6c3b43aaf8b69a9f021a8ca7947221ecb0d5150c6d7c35a7d29dd18299018d99",
+      "symbols": []
+    },
+    "CONTRIBUTING.md": {
+      "lines": 21,
+      "bytes": 2414,
+      "sha256": "feabae5937182fa0826b2d03eb2230735e4c57e2eb2f3783154c6c79cf2e128f",
+      "symbols": []
+    },
+    "Cargo.lock": {
+      "lines": 2193,
+      "bytes": 54060,
+      "sha256": "ba5422f4441094d680ebcf703e91f9b78618036ae983166e99ea23ace566b6d6",
+      "symbols": []
+    },
+    "Cargo.toml": {
+      "lines": 43,
+      "bytes": 1155,
+      "sha256": "dd11073c1745c9ecf433b480837417d2d03625fa53ccb3aabf1d882baccdaf6d",
+      "symbols": []
+    },
+    "LICENSE": {
+      "lines": 201,
+      "bytes": 11547,
+      "sha256": "811ceaf6979b9156c42ab6f5bddd26b44673de0b15090050e1efe5d2ec782a39",
+      "symbols": []
+    },
+    "NOTICE": {
+      "lines": 11,
+      "bytes": 481,
+      "sha256": "53b867b2bf1298be8c76256deecc75796ae4660ff85a52ec219ac65308b911ca",
+      "symbols": []
+    },
+    "README.md": {
+      "lines": 287,
+      "bytes": 21614,
+      "sha256": "678e35bbdebf57804070b77ecef167dfdb4a1d692fc54100c89c8629bd15298a",
+      "symbols": []
+    },
+    "SECURITY.md": {
+      "lines": 7,
+      "bytes": 1265,
+      "sha256": "7fbb57d535e8676bdfe5d1d671baa34d44d14a35f80ef548e2b57c51aa431d5f",
+      "symbols": []
+    },
+    "build-tools.toml": {
+      "lines": 26,
+      "bytes": 1038,
+      "sha256": "d994c4f3e4ba85ded05392e3e049fd672b3c28a4dae4cdbf725e7b0b8888fde3",
+      "symbols": []
+    },
+    "crates/cpuv-cli/Cargo.toml": {
+      "lines": 41,
+      "bytes": 1158,
+      "sha256": "6c83c3d8c41d218037665b63f91a8bea47a54c62aa913efec07764dddaa84234",
+      "symbols": []
+    },
+    "crates/cpuv-cli/src/host_tools.rs": {
+      "lines": 77,
+      "bytes": 2783,
+      "sha256": "89498c6b63794c11a27a93f771b37b5db3cf46ee69dc6fd8a0d5da0a3d166c51",
+      "symbols": [
+        {
+          "line": 9,
+          "name": "Manager"
+        },
+        {
+          "line": 15,
+          "name": "discover"
+        },
+        {
+          "line": 36,
+          "name": "command"
+        },
+        {
+          "line": 47,
+          "name": "ensure_base_devel"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/install.rs": {
+      "lines": 264,
+      "bytes": 9146,
+      "sha256": "64d624d7507f39c9d8d010b7b2c6b9ad2a6e970f38021280ed8a57243e56173e",
+      "symbols": [
+        {
+          "line": 7,
+          "name": "Options"
+        },
+        {
+          "line": 22,
+          "name": "Setup"
+        },
+        {
+          "line": 27,
+          "name": "is_setup"
+        },
+        {
+          "line": 37,
+          "name": "setup"
+        },
+        {
+          "line": 57,
+          "name": "install"
+        },
+        {
+          "line": 113,
+          "name": "wide"
+        },
+        {
+          "line": 116,
+          "name": "Key"
+        },
+        {
+          "line": 118,
+          "name": "drop"
+        },
+        {
+          "line": 125,
+          "name": "open"
+        },
+        {
+          "line": 149,
+          "name": "read"
+        },
+        {
+          "line": 194,
+          "name": "write"
+        },
+        {
+          "line": 217,
+          "name": "prepend"
+        },
+        {
+          "line": 232,
+          "name": "add_to_user_path"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/main.rs": {
+      "lines": 1066,
+      "bytes": 38466,
+      "sha256": "1270fa8cdcca4b14ef8e83a59350fe737401893714d8e3b0088c08e0d9723307",
+      "symbols": [
+        {
+          "line": 31,
+          "name": "Cli"
+        },
+        {
+          "line": 83,
+          "name": "transfer_limits"
+        },
+        {
+          "line": 95,
+          "name": "Action"
+        },
+        {
+          "line": 149,
+          "name": "SelfAction"
+        },
+        {
+          "line": 157,
+          "name": "Project"
+        },
+        {
+          "line": 163,
+          "name": "default_standard"
+        },
+        {
+          "line": 168,
+          "name": "Dependency"
+        },
+        {
+          "line": 177,
+          "name": "version"
+        },
+        {
+          "line": 191,
+          "name": "PinnedToolchain"
+        },
+        {
+          "line": 197,
+          "name": "Manifest"
+        },
+        {
+          "line": 207,
+          "name": "link_selection_empty"
+        },
+        {
+          "line": 212,
+          "name": "Backend"
+        },
+        {
+          "line": 218,
+          "name": "backend_is_auto"
+        },
+        {
+          "line": 222,
+          "name": "Lock"
+        },
+        {
+          "line": 230,
+          "name": "write_atomic"
+        },
+        {
+          "line": 239,
+          "name": "project_lock"
+        },
+        {
+          "line": 252,
+          "name": "read_manifest"
+        },
+        {
+          "line": 267,
+          "name": "check_toolchain"
+        },
+        {
+          "line": 279,
+          "name": "requirements"
+        },
+        {
+          "line": 310,
+          "name": "install_shim"
+        },
+        {
+          "line": 322,
+          "name": "activation"
+        },
+        {
+          "line": 335,
+          "name": "init"
+        },
+        {
+          "line": 412,
+          "name": "validate_packages"
+        },
+        {
+          "line": 430,
+          "name": "add"
+        },
+        {
+          "line": 486,
+          "name": "sync"
+        },
+        {
+          "line": 801,
+          "name": "Report"
+        },
+        {
+          "line": 854,
+          "name": "cache_dir"
+        },
+        {
+          "line": 864,
+          "name": "configure_environment"
+        },
+        {
+          "line": 922,
+          "name": "main"
+        },
+        {
+          "line": 949,
+          "name": "execute"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/runner.rs": {
+      "lines": 481,
+      "bytes": 16670,
+      "sha256": "dfb793ec38d5baf9511aeba61a9c044ae462a11701323e502225b4e6a694f633",
+      "symbols": [
+        {
+          "line": 12,
+          "name": "state_directory"
+        },
+        {
+          "line": 20,
+          "name": "SetFileAttributesW"
+        },
+        {
+          "line": 36,
+          "name": "compiler_command"
+        },
+        {
+          "line": 47,
+          "name": "source"
+        },
+        {
+          "line": 54,
+          "name": "link_input"
+        },
+        {
+          "line": 61,
+          "name": "artifact"
+        },
+        {
+          "line": 73,
+          "name": "takes_value"
+        },
+        {
+          "line": 96,
+          "name": "Plan"
+        },
+        {
+          "line": 102,
+          "name": "plan"
+        },
+        {
+          "line": 286,
+          "name": "runtime_path"
+        },
+        {
+          "line": 301,
+          "name": "status"
+        },
+        {
+          "line": 309,
+          "name": "missing_header_help"
+        },
+        {
+          "line": 322,
+          "name": "compiler_status"
+        },
+        {
+          "line": 352,
+          "name": "run"
+        },
+        {
+          "line": 430,
+          "name": "clean"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/source.rs": {
+      "lines": 808,
+      "bytes": 27099,
+      "sha256": "f7576a7165b248f7db4716d450d223d2d15cffe076596135eefcd89ea985f602",
+      "symbols": [
+        {
+          "line": 7,
+          "name": "Archive"
+        },
+        {
+          "line": 18,
+          "name": "one"
+        },
+        {
+          "line": 22,
+          "name": "Tool"
+        },
+        {
+          "line": 29,
+          "name": "Registry"
+        },
+        {
+          "line": 32,
+          "name": "custom_profile_requested"
+        },
+        {
+          "line": 38,
+          "name": "Profile"
+        },
+        {
+          "line": 46,
+          "name": "split_flags"
+        },
+        {
+          "line": 79,
+          "name": "split_flags"
+        },
+        {
+          "line": 84,
+          "name": "environment"
+        },
+        {
+          "line": 100,
+          "name": "compiler_flags"
+        },
+        {
+          "line": 119,
+          "name": "CatalogLock"
+        },
+        {
+          "line": 130,
+          "name": "requests_locked"
+        },
+        {
+          "line": 148,
+          "name": "standard"
+        },
+        {
+          "line": 185,
+          "name": "reference"
+        },
+        {
+          "line": 212,
+          "name": "command"
+        },
+        {
+          "line": 222,
+          "name": "run"
+        },
+        {
+          "line": 250,
+          "name": "configure_profile"
+        },
+        {
+          "line": 325,
+          "name": "modules_for"
+        },
+        {
+          "line": 356,
+          "name": "prepare_metadata"
+        },
+        {
+          "line": 505,
+          "name": "sync"
+        },
+        {
+          "line": 519,
+          "name": "SavedProfile"
+        },
+        {
+          "line": 739,
+          "name": "info"
+        },
+        {
+          "line": 752,
+          "name": "commit"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/source/archive.rs": {
+      "lines": 240,
+      "bytes": 8485,
+      "sha256": "01298d355ddf57b1c12f677a66f74ff809c33fb53279eb34ddfb59a4ab242141",
+      "symbols": [
+        {
+          "line": 5,
+          "name": "digest"
+        },
+        {
+          "line": 19,
+          "name": "download"
+        },
+        {
+          "line": 91,
+          "name": "destination"
+        },
+        {
+          "line": 100,
+          "name": "selected"
+        },
+        {
+          "line": 114,
+          "name": "extract"
+        },
+        {
+          "line": 212,
+          "name": "inventory"
+        },
+        {
+          "line": 230,
+          "name": "verify"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/source/tools.rs": {
+      "lines": 99,
+      "bytes": 3314,
+      "sha256": "6041e1df6fba9494867ce674d96b5d1fa05eac4ee9dfeb9ac941d5ea948fb08c",
+      "symbols": [
+        {
+          "line": 3,
+          "name": "Tools"
+        },
+        {
+          "line": 9,
+          "name": "get"
+        },
+        {
+          "line": 82,
+          "name": "prepare"
+        }
+      ]
+    },
+    "crates/cpuv-cli/src/update.rs": {
+      "lines": 204,
+      "bytes": 7959,
+      "sha256": "5991181c015d03915c67bdf2172f7706be0afb486825c406fe7c0654546a1714",
+      "symbols": [
+        {
+          "line": 15,
+          "name": "Options"
+        },
+        {
+          "line": 34,
+          "name": "version"
+        },
+        {
+          "line": 46,
+          "name": "checksum"
+        },
+        {
+          "line": 58,
+          "name": "download"
+        },
+        {
+          "line": 95,
+          "name": "run"
+        }
+      ]
+    },
+    "crates/cpuv-fetch/Cargo.toml": {
+      "lines": 23,
+      "bytes": 516,
+      "sha256": "0710ed426a7ec27a979ba9d43545f3a4ff26217220d713156f4f884fc81de2c3",
+      "symbols": []
+    },
+    "crates/cpuv-fetch/src/lib.rs": {
+      "lines": 360,
+      "bytes": 13339,
+      "sha256": "c787726e2299a6ede91564510a790cb5d5bc40135dee27be42dbd2f0e9e02ad0",
+      "symbols": [
+        {
+          "line": 24,
+          "name": "Fetcher"
+        },
+        {
+          "line": 36,
+          "name": "DownloadStats"
+        },
+        {
+          "line": 45,
+          "name": "new"
+        },
+        {
+          "line": 58,
+          "name": "with_limits"
+        },
+        {
+          "line": 87,
+          "name": "with_namespace"
+        },
+        {
+          "line": 93,
+          "name": "index"
+        },
+        {
+          "line": 163,
+          "name": "download_all"
+        },
+        {
+          "line": 199,
+          "name": "Guard"
+        },
+        {
+          "line": 201,
+          "name": "drop"
+        },
+        {
+          "line": 251,
+          "name": "download_one"
+        },
+        {
+          "line": 293,
+          "name": "verify_file"
+        },
+        {
+          "line": 315,
+          "name": "parse_database"
+        },
+        {
+          "line": 319,
+          "name": "parse_database_for"
+        },
+        {
+          "line": 323,
+          "name": "parse_database_with_limits"
+        }
+      ]
+    },
+    "crates/cpuv-fetch/src/policy.rs": {
+      "lines": 63,
+      "bytes": 2107,
+      "sha256": "a893f8fa160cc0d83f8641bee3a9823863e0f6d53358e933d58441c91724bf11",
+      "symbols": [
+        {
+          "line": 6,
+          "name": "Limits"
+        },
+        {
+          "line": 16,
+          "name": "default"
+        },
+        {
+          "line": 27,
+          "name": "allowed_url"
+        },
+        {
+          "line": 39,
+          "name": "client"
+        }
+      ]
+    },
+    "crates/cpuv-relocate/Cargo.toml": {
+      "lines": 19,
+      "bytes": 424,
+      "sha256": "65f2e6f3d29d9c8b14607227c9068e3b1664ca0b2bd4be9af75cd9bae6fb179f",
+      "symbols": []
+    },
+    "crates/cpuv-relocate/src/inspect.rs": {
+      "lines": 151,
+      "bytes": 6151,
+      "sha256": "6f9e11dee4171e0c0a4cb007bb178ca1302f52b41704c324ef0a18f3a678eb19",
+      "symbols": [
+        {
+          "line": 11,
+          "name": "Binary"
+        },
+        {
+          "line": 18,
+          "name": "environment"
+        },
+        {
+          "line": 22,
+          "name": "environment_with_runtime_policy"
+        }
+      ]
+    },
+    "crates/cpuv-relocate/src/lib.rs": {
+      "lines": 380,
+      "bytes": 13022,
+      "sha256": "047f4b25beab0589ed3cd208fb6622a876d6931fe4c5586e8f9a105c7ab69598",
+      "symbols": [
+        {
+          "line": 14,
+          "name": "Environment"
+        },
+        {
+          "line": 41,
+          "name": "msys_host_bin"
+        },
+        {
+          "line": 46,
+          "name": "expand"
+        },
+        {
+          "line": 60,
+          "name": "replace_private"
+        },
+        {
+          "line": 69,
+          "name": "index_environment"
+        },
+        {
+          "line": 159,
+          "name": "portable"
+        },
+        {
+          "line": 165,
+          "name": "generate_specs"
+        },
+        {
+          "line": 205,
+          "name": "is_compiler_query"
+        },
+        {
+          "line": 224,
+          "name": "validate_profile"
+        },
+        {
+          "line": 317,
+          "name": "compiler_args"
+        }
+      ]
+    },
+    "crates/cpuv-relocate/src/linking.rs": {
+      "lines": 277,
+      "bytes": 10370,
+      "sha256": "d311bf22e48c863b5b1185249da6f9d89bf9afd7a430f710dcc1696205ec2a60",
+      "symbols": [
+        {
+          "line": 13,
+          "name": "Selection"
+        },
+        {
+          "line": 23,
+          "name": "PackageFiles"
+        },
+        {
+          "line": 29,
+          "name": "Module"
+        },
+        {
+          "line": 34,
+          "name": "read"
+        },
+        {
+          "line": 61,
+          "name": "words"
+        },
+        {
+          "line": 89,
+          "name": "requirement_modules"
+        },
+        {
+          "line": 139,
+          "name": "relative"
+        },
+        {
+          "line": 155,
+          "name": "unique"
+        },
+        {
+          "line": 161,
+          "name": "apply"
+        }
+      ]
+    },
+    "crates/cpuv-shim/Cargo.toml": {
+      "lines": 15,
+      "bytes": 318,
+      "sha256": "17657663c4ffd264ce1f63c307d5460b4bf2d922012df694dd5ebbb46a8b7973",
+      "symbols": []
+    },
+    "crates/cpuv-shim/src/lib.rs": {
+      "lines": 161,
+      "bytes": 5541,
+      "sha256": "ac9b7c322c1abf84d85e8782c1e0e2d65d01c11176838ead698aea99817fc083",
+      "symbols": [
+        {
+          "line": 11,
+          "name": "environment"
+        },
+        {
+          "line": 28,
+          "name": "output_path"
+        },
+        {
+          "line": 62,
+          "name": "deploy_dlls"
+        },
+        {
+          "line": 124,
+          "name": "run"
+        }
+      ]
+    },
+    "crates/cpuv-shim/src/main.rs": {
+      "lines": 9,
+      "bytes": 211,
+      "sha256": "b3b3932722d118bbe2edb9b32c7c15cff2d5a82c88e971e3cfd917300d084f52",
+      "symbols": [
+        {
+          "line": 1,
+          "name": "main"
+        }
+      ]
+    },
+    "crates/cpuv-solver/Cargo.toml": {
+      "lines": 14,
+      "bytes": 291,
+      "sha256": "f44646952eba04592201dbecd5ac8976a546280a3f680eb3af2ef4fc2a0be9ee",
+      "symbols": []
+    },
+    "crates/cpuv-solver/src/lib.rs": {
+      "lines": 382,
+      "bytes": 12091,
+      "sha256": "2dc36c0a9e0ae79c4dd1e519068fff7bec158c8a67fc288e8547d4a147b72805",
+      "symbols": [
+        {
+          "line": 14,
+          "name": "Package"
+        },
+        {
+          "line": 25,
+          "name": "Index"
+        },
+        {
+          "line": 27,
+          "name": "parse_desc"
+        },
+        {
+          "line": 78,
+          "name": "normalize"
+        },
+        {
+          "line": 82,
+          "name": "normalize_for"
+        },
+        {
+          "line": 89,
+          "name": "split_requirement"
+        },
+        {
+          "line": 102,
+          "name": "segments_cmp"
+        },
+        {
+          "line": 185,
+          "name": "version_cmp"
+        },
+        {
+          "line": 186,
+          "name": "epoch"
+        },
+        {
+          "line": 203,
+          "name": "matches"
+        },
+        {
+          "line": 217,
+          "name": "suggestions"
+        },
+        {
+          "line": 218,
+          "name": "distance"
+        },
+        {
+          "line": 262,
+          "name": "provider"
+        },
+        {
+          "line": 316,
+          "name": "resolve"
+        },
+        {
+          "line": 320,
+          "name": "available"
+        },
+        {
+          "line": 331,
+          "name": "resolve_for"
+        },
+        {
+          "line": 332,
+          "name": "visit"
+        }
+      ]
+    },
+    "crates/cpuv-store/Cargo.toml": {
+      "lines": 21,
+      "bytes": 463,
+      "sha256": "1e55ac698226fc59a51fdbab461875dc5a5a46464a14f9356d27a8f734fe4447",
+      "symbols": []
+    },
+    "crates/cpuv-store/src/lib.rs": {
+      "lines": 346,
+      "bytes": 12926,
+      "sha256": "6dbae1e0a01cc837d40fbe3c271fea288d092dba4a1da84a702bc1cd4c550644",
+      "symbols": [
+        {
+          "line": 12,
+          "name": "StoredFile"
+        },
+        {
+          "line": 18,
+          "name": "StoredPackage"
+        },
+        {
+          "line": 23,
+          "name": "Store"
+        },
+        {
+          "line": 29,
+          "name": "LinkStats"
+        },
+        {
+          "line": 35,
+          "name": "safe_relative"
+        },
+        {
+          "line": 64,
+          "name": "link_or_copy"
+        },
+        {
+          "line": 77,
+          "name": "pacman_metadata"
+        },
+        {
+          "line": 88,
+          "name": "digest_file"
+        },
+        {
+          "line": 103,
+          "name": "new"
+        },
+        {
+          "line": 113,
+          "name": "with_extraction_limits"
+        },
+        {
+          "line": 118,
+          "name": "package_dir"
+        },
+        {
+          "line": 121,
+          "name": "cached"
+        },
+        {
+          "line": 150,
+          "name": "ingest"
+        },
+        {
+          "line": 314,
+          "name": "materialize"
+        }
+      ]
+    },
+    "crates/cpuv-toolchain/Cargo.toml": {
+      "lines": 20,
+      "bytes": 503,
+      "sha256": "5d8898cdea8f3797b64a88e0fec929b19db2c888d451c9d309400dd9da07c213",
+      "symbols": []
+    },
+    "crates/cpuv-toolchain/src/lib.rs": {
+      "lines": 422,
+      "bytes": 14713,
+      "sha256": "ab5f614882cf5a226306bf63d322a0a8d9a2243cf285812cdafcc3f6a82ad087",
+      "symbols": [
+        {
+          "line": 13,
+          "name": "AbiTuple"
+        },
+        {
+          "line": 30,
+          "name": "Provider"
+        },
+        {
+          "line": 38,
+          "name": "msys2"
+        },
+        {
+          "line": 49,
+          "name": "Toolchain"
+        },
+        {
+          "line": 67,
+          "name": "driver_path"
+        },
+        {
+          "line": 74,
+          "name": "is_project_shim"
+        },
+        {
+          "line": 78,
+          "name": "locate"
+        },
+        {
+          "line": 105,
+          "name": "discover"
+        },
+        {
+          "line": 120,
+          "name": "field"
+        },
+        {
+          "line": 125,
+          "name": "macro_value"
+        },
+        {
+          "line": 128,
+          "name": "parse_verbose"
+        },
+        {
+          "line": 271,
+          "name": "runtime_tag"
+        },
+        {
+          "line": 277,
+          "name": "default_standard"
+        },
+        {
+          "line": 285,
+          "name": "compiler_command"
+        },
+        {
+          "line": 298,
+          "name": "probe"
+        },
+        {
+          "line": 302,
+          "name": "probe_with_flags"
+        },
+        {
+          "line": 388,
+          "name": "doctor"
+        }
+      ]
+    },
+    "crates/cpuv-toolchain/src/msys.rs": {
+      "lines": 213,
+      "bytes": 7562,
+      "sha256": "894c4652ea37cd69dd17a97ee22a65912fe74544ae0597ff2b4db21eea00371f",
+      "symbols": [
+        {
+          "line": 5,
+          "name": "add_root"
+        },
+        {
+          "line": 14,
+          "name": "discover"
+        },
+        {
+          "line": 104,
+          "name": "Key"
+        },
+        {
+          "line": 106,
+          "name": "drop"
+        },
+        {
+          "line": 112,
+          "name": "wide"
+        },
+        {
+          "line": 115,
+          "name": "open"
+        },
+        {
+          "line": 121,
+          "name": "text"
+        },
+        {
+          "line": 161,
+          "name": "installations"
+        }
+      ]
+    },
+    "docs/architecture.md": {
+      "lines": 109,
+      "bytes": 14429,
+      "sha256": "773e3d94c40bffba0d9344a770e417be17124806426406d374bd5331f3825166",
+      "symbols": []
+    },
+    "docs/compatibility.md": {
+      "lines": 44,
+      "bytes": 4926,
+      "sha256": "afc180da32ef7849b9f9afc88f2e1efc8dacdf431c9b29d5655ea45327288f1e",
+      "symbols": []
+    },
+    "docs/release-notes/v0.0.1.md": {
+      "lines": 37,
+      "bytes": 2805,
+      "sha256": "6798ba5e3feb13d0dff82a0e30034225bde589afd1c3b0ffcc8e2ecd9bec8480",
+      "symbols": []
+    },
+    "docs/release-notes/v0.0.2.md": {
+      "lines": 7,
+      "bytes": 962,
+      "sha256": "1988c4b5be8277927a632bf0044cd827ee9647a2d46b93c2e3b435834250f528",
+      "symbols": []
+    },
+    "docs/releases.md": {
+      "lines": 55,
+      "bytes": 4535,
+      "sha256": "9f7b3e7c841b5e749cb699f12851b744834958bf9334ae7acb853b644fc8e8e0",
+      "symbols": []
+    },
+    "docs/source-builds.md": {
+      "lines": 64,
+      "bytes": 5151,
+      "sha256": "b22e6f0cb34c3c35f22241bf8050c5c6c4fa079c99e1447b71bd551948232e10",
+      "symbols": []
+    },
+    "install.ps1": {
+      "lines": 67,
+      "bytes": 3935,
+      "sha256": "e80a26d9615b0c1ba08095b5cbb86ca05bdb040f9e085a2aa8612bd74ca87eb4",
+      "symbols": []
+    },
+    "overview.md": {
+      "lines": 75,
+      "bytes": 7455,
+      "sha256": "30ad79f82ea6f8ffd9cf738871b83d4cd18b4892e9d9f21ad60ed3677d180fc2",
+      "symbols": []
+    },
+    "scripts/build.ps1": {
+      "lines": 19,
+      "bytes": 1090,
+      "sha256": "9ed84a506494b8704cfbfd7eb80b5f65ab6a1076fbb1a2eb34be6e7230bedf41",
+      "symbols": []
+    },
+    "scripts/install.ps1": {
+      "lines": 65,
+      "bytes": 3294,
+      "sha256": "818c283ee38900f0629d421452c9a0f6f0c90296b0408814b47e31c54e78e9de",
+      "symbols": []
+    },
+    "scripts/package.ps1": {
+      "lines": 45,
+      "bytes": 3080,
+      "sha256": "2c5cfe6789454ba1af81a84bb760822ce3d3e546f0b670cba4a011ec536f7e55",
+      "symbols": []
+    }
+  }
+}

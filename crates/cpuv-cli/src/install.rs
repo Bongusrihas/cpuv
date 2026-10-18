@@ -94,7 +94,7 @@ pub fn install(options: &Options) -> Result<i32> {
 }
 
 #[cfg(windows)]
-mod windows {
+pub(crate) mod windows {
     use super::*;
     use anyhow::bail;
     use std::path::Path;
@@ -228,6 +228,89 @@ mod windows {
                 .filter(|entry| !entry.is_empty() && !equivalent(entry)),
         );
         entries.join(";")
+    }
+    fn normalized_entry(entry: &str) -> Option<String> {
+        use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+        if entry.trim().trim_matches('"').is_empty() {
+            return None;
+        }
+        let input = wide(entry.trim().trim_matches('"'));
+        let length = unsafe { ExpandEnvironmentStringsW(input.as_ptr(), std::ptr::null_mut(), 0) };
+        if length == 0 || length > 32768 {
+            return None;
+        }
+        let mut output = vec![0_u16; length as usize];
+        let written =
+            unsafe { ExpandEnvironmentStringsW(input.as_ptr(), output.as_mut_ptr(), length) };
+        if written == 0 || written > length {
+            return None;
+        }
+        let expanded = String::from_utf16(&output[..written.saturating_sub(1) as usize]).ok()?;
+        let path = Path::new(&expanded);
+        if !path.is_absolute() {
+            return None;
+        }
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        Some(
+            cpuv_toolchain::driver_path(resolved)
+                .to_string_lossy()
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_lowercase(),
+        )
+    }
+    pub(crate) struct PathEdit {
+        old: String,
+        updated: String,
+        kind: u32,
+    }
+    impl PathEdit {
+        pub(crate) fn restore(self) -> Result<()> {
+            let key = Key::open("Environment")?;
+            ensure!(
+                key.read()? == (self.updated, self.kind),
+                "User PATH changed concurrently; it was not overwritten during recovery"
+            );
+            key.write(&self.old, self.kind)?;
+            broadcast();
+            Ok(())
+        }
+    }
+    pub(crate) fn remove_from_user_path(directories: &[PathBuf]) -> Result<Option<PathEdit>> {
+        if directories.is_empty() {
+            return Ok(None);
+        }
+        let key = Key::open("Environment")?;
+        let (old, kind) = key.read()?;
+        let normalized: Vec<_> = directories
+            .iter()
+            .filter_map(|p| p.to_str().and_then(normalized_entry))
+            .collect();
+        let updated = old
+            .split(';')
+            .filter(|entry| !normalized_entry(entry).is_some_and(|path| normalized.contains(&path)))
+            .collect::<Vec<_>>()
+            .join(";");
+        if updated == old {
+            return Ok(None);
+        }
+        key.write(&updated, kind)?;
+        broadcast();
+        Ok(Some(PathEdit { old, updated, kind }))
+    }
+    fn broadcast() {
+        let message = wide("Environment");
+        unsafe {
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                message.as_ptr() as isize,
+                SMTO_ABORTIFHUNG,
+                2000,
+                std::ptr::null_mut(),
+            );
+        }
     }
     pub fn add_to_user_path(directory: &Path) -> Result<()> {
         let key = Key::open("Environment")?;

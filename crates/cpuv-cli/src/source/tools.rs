@@ -3,6 +3,7 @@ use super::*;
 pub struct Tools {
     pub cmake: PathBuf,
     pub ninja: PathBuf,
+    pub conan: PathBuf,
 }
 
 async fn get(
@@ -20,7 +21,7 @@ async fn get(
     let spec = registry
         .tools
         .get(name)
-        .with_context(|| format!("No bootstrap recipe for build tool {name}"))?;
+        .with_context(|| format!("No pinned bootstrap entry for build tool {name}"))?;
     ensure!(
         cpuv_solver::version_cmp(&spec.version, minimum) != std::cmp::Ordering::Less,
         "Build tool {name} is older than required"
@@ -85,9 +86,14 @@ pub async fn prepare(
     limits: &cpuv_fetch::Limits,
 ) -> Result<Tools> {
     // Independent tool downloads use the same verified archive cache.
-    let (cmake, ninja) = tokio::try_join!(
+    let (cmake, ninja, conan) = tokio::try_join!(
         get("cmake", "3.20", registry, cache, offline, limits),
-        get("ninja", "1.10", registry, cache, offline, limits)
+        get("ninja", "1.10", registry, cache, offline, limits),
+        get("conan", "2.33", registry, cache, offline, limits)
     )?;
-    Ok(Tools { cmake, ninja })
+    Ok(Tools {
+        cmake,
+        ninja,
+        conan,
+    })
 }

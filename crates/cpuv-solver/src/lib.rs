@@ -242,7 +242,8 @@ pub fn suggestions<'a>(query: &str, names: impl IntoIterator<Item = &'a str>) ->
             continue;
         }
         let lower = name.to_ascii_lowercase();
-        let contained = lower.contains(&query) || query.contains(&lower);
+        let contained =
+            query.len().min(lower.len()) >= 3 && (lower.contains(&query) || query.contains(&lower));
         if !contained && query.len().abs_diff(lower.len()) > threshold {
             continue;
         }
@@ -314,6 +315,17 @@ fn provider<'a>(index: &'a Index, requirement: &str, prefix: &str) -> Result<&'a
 
 pub fn resolve(index: &Index, roots: &[String]) -> Result<Vec<Package>> {
     resolve_for(index, roots, PREFIX)
+}
+
+pub fn available(index: &Index, name: &str, prefix: &str) -> bool {
+    let normalized = normalize_for(name, prefix);
+    index.contains_key(&normalized)
+        || index.values().any(|package| {
+            package
+                .provides
+                .iter()
+                .any(|provided| split_requirement(provided).0 == normalized)
+        })
 }
 
 pub fn resolve_for(index: &Index, roots: &[String], prefix: &str) -> Result<Vec<Package>> {

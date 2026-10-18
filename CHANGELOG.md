@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.2 — 2026-10-18
+
+- Add cpuv uninstall and a read-only --dry-run preview, Windows self deletion, recognized companion cleanup, and user PATH cleanup that preserves shared tool directories and project/cache data.
+- Add cpuv rm as an alias for dependency removal, retaining shared dependencies and caches while rebuilding the remaining environment.
+- Remove cpuv-owned library recipes, library patches, custom recipe registries, and --recipes.
+- Fall back automatically from missing MSYS2 packages to ConanCenter for the whole environment; --catalog selects it explicitly.
+- Bootstrap standalone Conan alongside CMake/Ninja without requiring system Python or Rust.
+- Resolve transitive requirements and public interfaces from upstream metadata, build missing compatible binaries, and deploy transactionally.
+- Record catalog revision locks and saved compiler profiles, check provider cache manifests, and preserve offline binary-cache reuse.
+- Prevent one-letter substring matches from producing unrelated missing-package suggestions.
+- Add a project encyclopedia covering source structure, architecture, interfaces, operations, verification, and documented limitations, with a separate application uninstall update.
+
 ## 0.0.1
 
 Initial public source release.

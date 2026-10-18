@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-cli"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-fetch"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "cpuv-solver",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-relocate"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "cpuv-solver",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-shim"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "cpuv-relocate",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-solver"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "regex",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-store"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "cpuv-toolchain"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "blake3",

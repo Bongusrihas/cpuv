@@ -1,4 +1,4 @@
-cpuv 0.0.1
+cpuv 0.0.2
 Copyright 2026 Bongu srihas
 
 Author: Bongu srihas
@@ -7,5 +7,5 @@ Co-authors: Gemini 4 argon and GPT-6 sol
 This project is licensed under the Apache License, Version 2.0.
 Third-party dependencies and packages retain their respective licenses and notices.
 Source dependencies and build tools are downloaded separately from their upstream
-publishers. Source-built environments retain recipe-selected upstream license
-files under share/licenses; bootstrapped tools retain their archived notices.
+publishers. Catalog deployments retain upstream-packaged license files in each package
+directory; bootstrapped tools retain their archived notices.

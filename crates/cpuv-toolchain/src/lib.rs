@@ -254,6 +254,7 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
             "__AVX2__",
             "_GLIBCXX_DEBUG",
             "__cplusplus",
+            "__STRICT_ANSI__",
         ]
         .into_iter()
         .map(|name| {

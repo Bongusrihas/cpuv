@@ -20,6 +20,7 @@ mod host_tools;
 mod install;
 mod runner;
 mod source;
+mod uninstall;
 mod update;
 
 #[derive(Parser)]
@@ -40,16 +41,16 @@ struct Cli {
     /// Maximum compressed repository metadata size in MiB; separate from packages.
     #[arg(long, global=true, env="CPUV_MAX_INDEX_MIB", default_value_t=64, value_parser=clap::value_parser!(u64).range(1..=1_048_576))]
     max_index_mib: u64,
-    /// Maximum size of each package/source/tool archive in MiB.
+    /// Maximum MSYS2/bootstrap archive size in MiB; Conan owns catalog transfers.
     #[arg(long, global=true, env="CPUV_MAX_DOWNLOAD_MIB", default_value_t=16_384, value_parser=clap::value_parser!(u64).range(1..=1_048_576))]
     max_download_mib: u64,
-    /// Maximum expanded payload size per archive in MiB.
+    /// Maximum expanded payload per MSYS2/bootstrap archive in MiB.
     #[arg(long, global=true, env="CPUV_MAX_EXTRACT_MIB", default_value_t=65_536, value_parser=clap::value_parser!(u64).range(1..=1_048_576))]
     max_extract_mib: u64,
-    /// Maximum entries per archive.
+    /// Maximum entries per MSYS2/bootstrap archive.
     #[arg(long, global=true, env="CPUV_MAX_EXTRACT_FILES", default_value_t=1_000_000, value_parser=clap::value_parser!(u64).range(1..=10_000_000))]
     max_extract_files: u64,
-    /// Whole-transfer timeout in seconds; 0 keeps only connection/read timeouts.
+    /// MSYS2/bootstrap transfer timeout; 0 keeps connection/read timeouts only.
     #[arg(
         long,
         global = true,
@@ -63,12 +64,12 @@ struct Cli {
     refresh: bool,
     #[arg(long, global = true)]
     compiler: Option<PathBuf>,
-    /// Build recipe-backed packages with the selected GCC instead of MSYS2 binaries.
+    /// Build catalog packages from source with the selected GCC.
     #[arg(long, global = true, env = "CPUV_FROM_SOURCE")]
     from_source: bool,
-    /// Optional source-recipe registry; defaults are embedded in cpuv.
-    #[arg(long, global = true, env = "CPUV_RECIPES")]
-    recipes: Option<PathBuf>,
+    /// Use the shared ConanCenter catalog for the entire dependency environment.
+    #[arg(long, global = true)]
+    catalog: bool,
     /// Maximum simultaneous compiler jobs for source builds.
     #[arg(long, global=true, env="CPUV_BUILD_JOBS", value_parser=clap::value_parser!(u16).range(1..=256))]
     build_jobs: Option<u16>,
@@ -93,6 +94,8 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Uninstall the invoked cpuv application; keep projects and package caches.
+    Uninstall(uninstall::Options),
     /// Manage the installed cpuv executable.
     #[command(name = "self")]
     SelfCommand {
@@ -110,6 +113,7 @@ enum Action {
         packages: Vec<String>,
     },
     /// Remove direct dependencies and rebuild the environment.
+    #[command(visible_alias = "rm")]
     Remove {
         #[arg(required = true)]
         packages: Vec<String>,
@@ -179,7 +183,7 @@ impl Dependency {
             Self::Detailed { version, linkage } => {
                 ensure!(
                     linkage.as_deref().is_none_or(|s| s == "shared"),
-                    "Linkage is defined by the selected provider or source recipe; this declaration supports default/shared linkage"
+                    "Linkage is defined by the selected provider or upstream package metadata; this declaration supports default/shared linkage"
                 );
                 Ok(version)
             }
@@ -211,7 +215,8 @@ fn link_selection_empty(selection: &cpuv_relocate::linking::Selection) -> bool {
 enum Backend {
     #[default]
     Auto,
-    Source,
+    #[serde(alias = "source")]
+    Conan,
 }
 fn backend_is_auto(value: &Backend) -> bool {
     *value == Backend::Auto
@@ -338,8 +343,12 @@ fn init(root: &Path, cli: &Cli) -> Result<()> {
     );
     let tc = cpuv_toolchain::probe(cli.compiler.as_deref())?;
     let m = Manifest {
-        backend: if cli.from_source || tc.provider.is_none() || source::custom_profile_requested() {
-            Backend::Source
+        backend: if cli.catalog
+            || cli.from_source
+            || tc.provider.is_none()
+            || source::custom_profile_requested()
+        {
+            Backend::Conan
         } else {
             Backend::Auto
         },
@@ -350,7 +359,11 @@ fn init(root: &Path, cli: &Cli) -> Result<()> {
                 .to_string_lossy()
                 .to_string(),
             version: "0.1.0".into(),
-            std: if cli.from_source || tc.provider.is_none() || source::custom_profile_requested() {
+            std: if cli.catalog
+                || cli.from_source
+                || tc.provider.is_none()
+                || source::custom_profile_requested()
+            {
                 "default".into()
             } else {
                 tc.default_standard()
@@ -443,20 +456,21 @@ async fn add(root: &Path, cli: &Cli, requested: &[String], needed: bool) -> Resu
             .ok()
             .and_then(|text| toml::from_str(&text).ok());
         let keep_lock = needed
-            && locked.as_ref().is_some_and(|lock| {
-                lock.dependencies == manifest.dependencies
-                    && lock.abi_hash == tc.abi_hash
-                    && libraries.iter().all(|request| {
-                        let (name, op, value) = cpuv_solver::split_requirement(request);
-                        manifest.dependencies.iter().any(|(existing, dependency)| {
-                            cpuv_solver::normalize_for(existing, namespace)
-                                == cpuv_solver::normalize_for(name, namespace)
-                                && dependency.version().is_ok_and(|constraint| {
-                                    op.is_empty() || constraint == format!("{op}{value}")
-                                })
+            && (source::requests_locked(root, &manifest, &libraries)
+                || locked.as_ref().is_some_and(|lock| {
+                    lock.dependencies == manifest.dependencies
+                        && lock.abi_hash == tc.abi_hash
+                        && libraries.iter().all(|request| {
+                            let (name, op, value) = cpuv_solver::split_requirement(request);
+                            manifest.dependencies.iter().any(|(existing, dependency)| {
+                                cpuv_solver::normalize_for(existing, namespace)
+                                    == cpuv_solver::normalize_for(name, namespace)
+                                    && dependency.version().is_ok_and(|constraint| {
+                                        op.is_empty() || constraint == format!("{op}{value}")
+                                    })
+                            })
                         })
-                    })
-            });
+                }));
         if keep_lock {
             eprintln!(
                 "Requested dependencies are already locked; keeping their versions (--needed)."
@@ -518,14 +532,15 @@ async fn sync(
         }
     }
     let roots = requirements(&manifest)?;
-    if cli.from_source
-        || manifest.backend == Backend::Source
+    if cli.catalog
+        || cli.from_source
+        || manifest.backend == Backend::Conan
         || tc.provider.is_none()
         || source::custom_profile_requested()
         || changed_compiler
         || cli.reset_profile
     {
-        manifest.backend = Backend::Source;
+        manifest.backend = Backend::Conan;
         manifest.toolchain = PinnedToolchain {
             target: tc.abi.target_triple.clone(),
             compiler: format!("gcc@{}", tc.gcc_version),
@@ -600,6 +615,16 @@ async fn sync(
             let index_start = Instant::now();
             let index = fetcher.index(cli.refresh || force_resolve).await?;
             index_fetch_ms = index_start.elapsed().as_secs_f64() * 1000.0;
+            if roots.iter().any(|requirement| {
+                let name = cpuv_solver::split_requirement(requirement).0;
+                !cpuv_solver::available(&index, name, namespace)
+            }) {
+                eprintln!(
+                    "A dependency is absent from the MSYS2 snapshot; querying the shared ConanCenter catalog..."
+                );
+                manifest.backend = Backend::Conan;
+                return source::sync(root, cli, &manifest, &tc, force_resolve).await;
+            }
             cpuv_solver::resolve_for(&index, &roots, namespace)?
         }
     };
@@ -616,10 +641,10 @@ async fn sync(
             let major = p.version.split('.').next().unwrap_or("");
             if major != tc.abi.compiler_abi_major {
                 eprintln!(
-                    "Repository runtime {} differs from GCC {}; resolving source recipes instead",
+                    "Repository runtime {} differs from GCC {}; querying ConanCenter for the selected compiler",
                     p.version, tc.gcc_version
                 );
-                manifest.backend = Backend::Source;
+                manifest.backend = Backend::Conan;
                 return source::sync(root, cli, &manifest, &tc, force_resolve).await;
             }
         }
@@ -925,6 +950,9 @@ fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<i32> {
+    if let Action::Uninstall(options) = &cli.command {
+        return uninstall::run(options);
+    }
     if let Action::SelfCommand {
         command: SelfAction::Install(options),
     } = &cli.command
@@ -1027,7 +1055,7 @@ async fn execute(cli: Cli) -> Result<i32> {
                 cache_dir(&cli)?.display()
             );
             if root.join("cpuv.lock").is_file() {
-                if read_manifest(&root)?.backend == Backend::Source {
+                if read_manifest(&root)?.backend == Backend::Conan {
                     source::info(&root)?;
                     return Ok(0);
                 }
@@ -1038,7 +1066,10 @@ async fn execute(cli: Cli) -> Result<i32> {
                 }
             }
         }
-        Action::Toolchain | Action::Doctor { .. } | Action::SelfCommand { .. } => unreachable!(),
+        Action::Toolchain
+        | Action::Doctor { .. }
+        | Action::SelfCommand { .. }
+        | Action::Uninstall(_) => unreachable!(),
     }
     Ok(0)
 }
