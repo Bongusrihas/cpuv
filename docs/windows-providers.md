@@ -81,6 +81,6 @@ Omit a separate version constraint for an explicit reference. Its package name m
 
 Native search/list/profile/cache and other Conan commands are available; a bare command shows upstream help. With cpuv --offline, install/create/build receive --no-remote; export, profile, cache, help/version, and remote list are permitted locally. For other operations use upstream offline flags explicitly. Offline mode cannot sandbox recipe code or subprocesses.
 
-Recipes run with your permissions. Unknown packages still need a catalog entry or an explicit recipe; cpuv cannot infer build instructions from a name. See [compatibility](compatibility.md), [catalog details](source-builds.md), and [security](../SECURITY.md).
+Recipes run with your permissions. Unknown packages still need a catalog entry or an explicit recipe; cpuv cannot infer build instructions from a name. See [compatibility](compatibility.md), [catalog details](source-builds.md), [troubleshooting](troubleshooting.md), and [security](../SECURITY.md).
 
 Upstream references: [MSYS2 environments](https://www.msys2.org/docs/environments/), [Conan remotes](https://docs.conan.io/2/reference/commands/remote.html), and [Conan export](https://docs.conan.io/2/reference/commands/export.html).

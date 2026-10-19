@@ -10,7 +10,10 @@ flowchart TD
     Solver --> Fetch[Parallel verified downloads]
     Fetch --> Store[Safe extraction and content store]
     Provider -->|No or explicit catalog| Catalog[ConanCenter dependency graph]
+    Catalog --> Profiles[Separate target and native build profiles]
+    Profiles --> Tools[Verified platform tool requirements]
     Catalog --> Native[Reuse packages or build with selected GCC]
+    Tools --> Native
     Store --> Env[Staged environment and link plan]
     Native --> Env
     Env --> Inspect[Binary inspection and transactional commit]
@@ -50,6 +53,10 @@ MSYS2 version-1 locks record versions, checksums, ownership, and an ABI filter. 
 
 CPPFLAGS/CFLAGS/CXXFLAGS/LDFLAGS define the saved catalog profile. Dependencies and consumers receive the same configured inputs. Unset variables retain saved values; --reset-profile clears them before applying current values. Compiler hashes, observations, language mode, and flags separate catalog homes and participate in package identities. Header-only/tool recipes can intentionally reduce identities.
 
+The Conan host profile retains the target GCC, architecture, language mode, and saved flags. A separate build profile describes native tools using cpuv's execution architecture and an independently discovered GCC; --build-compiler/CPUV_BUILD_CXX can select that compiler explicitly. A 32-bit target on x64 Windows therefore does not request 32-bit CMake. Target ABI flags are excluded from build-tool compilation. Without a native build compiler, supplied platform tools remain available, while other tools requiring compilation need a suitable compiler.
+
+build-tools.toml declares provider identities for the pinned bootstrap tools. Archive integrity and executable version checks precede advertising the exact CMake/Ninja versions in both profiles' platform tool requirements. Supplied tools lead the provider PATH. Conan accepts a platform tool only when its version satisfies the upstream requirement; cpuv does not rewrite recipe requirements or advertise an invented version.
+
 cpuv verifies Conan cache manifests before and after install. Host packages deploy privately; paths are relocated, DLL collisions checked, binaries inspected, and output inventoried before commit. Failed transactions restore the active environment; failed restoration retains backups. Transactions are not crash-proof against every filesystem/power failure.
 
 ## Linking and execution
@@ -58,6 +65,8 @@ Ownership and public pkg-config metadata determine includes, definitions, librar
 
 The compiler shim is primary. GCC specs are experimental and require explicit loading; catalog profiles require the shim. Fingerprints are compatibility filters. PE/COFF architecture, runtime import, and packaged-symbol checks add evidence without proving arbitrary CPU, debug, packing, external DLL, or LTO compatibility.
 
+Archive signatures distinguish genuine .a/.lib archives from text documents. Non-archive files outside library directories are preserved and recorded in compatibility.json under non_archive_files_skipped. Malformed files in library directories still fail validation; genuine archives retain architecture checks throughout nested package deployments.
+
 cpuv run g++ program.cpp stores outputs in .cpuv/build, executes successful program links, preserves the project working directory, and supplies dependency/compiler DLL paths. Compile-only, query, preprocessing, and shared-library commands do not execute programs. Raw activated compiler use follows ordinary GCC output conventions. cpuv clean archives loose binaries under .cpuv/build/legacy.
 
 ## Distribution, performance, and trust
@@ -65,6 +74,8 @@ cpuv run g++ program.cpp stores outputs in .cpuv/build, executes successful prog
 cpuv rm PACKAGE (also cpuv remove) removes a direct project requirement and synchronizes the remaining graph. Dependencies still required by other roots and shared caches are retained.
 
 The x64 Windows executable statically links its Microsoft C runtime. Native setup updates the user installation/PATH without Rust, administrator access, or a shell. The optional PowerShell bootstrap downloads and checks a prebuilt installer. Self update verifies published assets and replaces the invoked executable. See [releases](docs/releases.md).
+
+Source pushes and release asset uploads are separate operations. Rebuilt assets at the same application version require cpuv self update --force after publication; the version string alone cannot identify that maintenance build. Release notes should record its source commit. See [troubleshooting](docs/troubleshooting.md) for diagnosing an old executable and provider failures.
 
 cpuv uninstall removes the application and recognized helpers; --dry-run previews the operation. User PATH cleanup preserves directories shared with other tools. Project source, project environments, GCC, and package caches are retained. The [project encyclopedia](docs/project-encyclopedia/MASTER_INDEX.md) provides a dated source audit and a separate uninstall implementation update.
 

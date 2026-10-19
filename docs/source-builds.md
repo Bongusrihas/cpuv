@@ -66,6 +66,8 @@ Conan recipes execute Python code with your permissions, including binary resolu
 
 ## Upstream documentation
 
+For executable selection, archive classification errors, native tool profiles, and provider diagnostics, see [troubleshooting](troubleshooting.md).
+
 - [Standalone Conan installation](https://docs.conan.io/2/installation.html)
 - [Conan install](https://docs.conan.io/2/reference/commands/install.html)
 - [PkgConfigDeps interfaces](https://docs.conan.io/2/reference/tools/gnu/pkgconfigdeps.html)

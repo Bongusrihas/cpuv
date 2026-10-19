@@ -46,6 +46,22 @@ Installed users can run cpuv self update, or cpuv self update --check to check a
 
 The direct cpuv-setup.exe download supports installation without a PowerShell command. Until a release with these assets is published, public install links will return a missing-release error. The installer does not fall back to compiling from source.
 
+## Refresh an existing release manually
+
+A push to main updates the source repository. It does not replace the assets of an existing release. Prefer a new patch version and matching tag when publishing changed executables so the tagged source and release binaries describe the same implementation.
+
+For a same-version maintenance refresh, build from the intended clean source commit with scripts/package.ps1, record that commit in the release description, and replace all five assets listed above. In the GitHub release editor, remove the previous assets with those names and upload the rebuilt installer, ZIP, both checksum files, and install.ps1. Review the complete asset set before saving the release. Keep it stable and latest when it is intended for the standard installer channel.
+
+Do not move a published tag just to replace assets. If the existing tag is retained, its automatic source archives still describe the original tagged commit; link the maintenance source commit explicitly in the release description. The rebuilt 0.0.3 maintenance assets implement the fixes in [9f6dcf6](https://github.com/Bongusrihas/cpuv/commit/9f6dcf6ab135d115e94603a5b525cc59ed242f7b).
+
+An already installed copy with the same version will need:
+
+```powershell
+cpuv self update --force
+```
+
+Run this only after replacement assets are published. New installations use those assets through the normal setup or bootstrap download. The version string is unchanged, so it cannot distinguish the original and maintenance binaries by itself. See [troubleshooting](troubleshooting.md#check-the-executable-and-compiler-first).
+
 ## Installation behavior and trust
 
 The native installer installs a single cpuv.exe in the current user's .local/bin, preserves unrelated user PATH entries and their expandable registry format, and broadcasts the environment change. Existing terminal processes need to be reopened. The PowerShell bootstrap also updates its own session PATH for immediate use. No machine-wide environment variables are changed.

@@ -16,6 +16,7 @@ cpuv manages native C++ dependencies, prepares a project environment, and compil
 - Toolchain discovery, MSYS2-backed GCC installation, and verified compiler selection.
 - Native Conan commands for remotes, upstream/local recipes, and full recipe references.
 - Automatic ConanCenter fallback for missing MSYS2 packages and other native GCC profiles, without cpuv library recipes.
+- Separate Conan target/build profiles and verified native build tools, including 32-bit GCC targets on x64 Windows.
 - Automatic compilation and execution, without EXE or DLL files scattered across your source directory.
 - Exact package names from upstream catalogs, with no cpuv library aliases or named linker defaults.
 
@@ -68,6 +69,14 @@ The command removes the invoked executable, matching copies in cpuv's standard p
 
 Self update downloads the latest published stable GitHub release, verifies its checksum and executable version, and safely replaces the invoked Windows executable. It requires no Rust or PowerShell. Use --version 0.0.3 to select a release, or --force to reinstall the same version or explicitly request a downgrade. Other copies of cpuv on disk are not updated. Project environments and dependency caches are preserved. A separate compiler-shim download is unnecessary.
 
+After a maintainer replaces the assets of an existing release, install that updated build with:
+
+~~~powershell
+cpuv self update --force
+~~~
+
+This requires the rebuilt assets to be published first. A Git push updates source; it does not replace existing release downloads. See [release instructions](docs/releases.md#refresh-an-existing-release-manually).
+
 For a custom location, set CPUV_INSTALL_DIR before the one-command install, or run the downloaded setup executable with options:
 
 ~~~powershell
@@ -95,6 +104,8 @@ cpuv add 'library/1.2.3@myteam/stable'
 ```
 
 Replace the example recipe path/reference with the actual package. Remotes, authentication, recipes, create/build, and cache commands are supplied by standalone Conan. Full recipe references select Conan automatically and remain in the project manifest. There are no library-specific cpuv recipes. Nix/Linux packages are outside this Windows release. Recipe code runs with your permissions; use trusted sources.
+
+Conan's host profile describes target libraries and applications. Its build profile describes tools that run on the build machine. A 32-bit target on x64 Windows retains its target ABI while CMake/Ninja run as x64 tools. cpuv declares the verified bootstrap versions through Conan platform tool requirements; upstream version constraints still decide whether those tools qualify. A native GCC for additional build-tool compilation is discovered independently or selected with --build-compiler PATH / CPUV_BUILD_CXX. Use cpuv conan profile show to inspect both profiles. See [catalog profiles and tooling](docs/source-builds.md).
 
 ## Your first program
 
@@ -208,6 +219,8 @@ Precompiled C++ libraries cannot safely be used across arbitrary ABIs. cpuv choo
 
 Matching fingerprints are a compatibility filter, not a guarantee. Before committing a managed environment, cpuv inspects PE binaries and COFF archive members for architecture, checks direct runtime imports, and checks named symbol edges between packaged DLLs. The report .cpuv/env/compatibility.json lists evidence and unresolved external DLLs. CPU instruction requirements, all feature/debug macros, packing, ordinal imports, external exports, and LTO compatibility are not proved by these checks. Common ABI-changing compile options are rejected for managed binary environments.
 
+Archive inspection checks the file signature before parsing .a/.lib candidates. Text documents outside library directories, including licenses with a .LIB extension, remain installed and are listed under non_archive_files_skipped in that report. Malformed files in library directories and wrong-architecture members of genuine archives still fail validation.
+
 The compiler shim is the primary integration. Generated GCC specs are experimental and only take effect when the real compiler is explicitly invoked with -specs=.cpuv/env/cpuv.specs and CPUV_ENV set. Merely writing a specs file does not change an unmodified g++. Unsupported specs plans fail with a message to use the shim.
 
 GCC remains responsible for selecting and invoking its linker. Driver options such as -fuse-ld are forwarded. The selected linker must support the compiler's target, object format, runtime, and options.
@@ -230,6 +243,10 @@ cpuv ships no per-library source registry, patches, or handwritten library recip
 CPPFLAGS, CFLAGS, CXXFLAGS, and LDFLAGS define a saved build profile. Run cpuv sync after changing it. Dependencies and consumers receive that profile; compiler/profile identities separate caches. A version-3 lock embeds upstream revision references, package versions, and portable profile inputs. Local compiler paths remain in .cpuv and the local cache. Older source locks migrate during the next successful synchronization.
 
 cpuv doctor compiles, links, and runs a small program using the actual driver. Use cpuv doctor -- -fuse-ld=bfd to check a driver-supported linker. See [catalog installation details](docs/source-builds.md).
+
+## Troubleshooting
+
+See [troubleshooting](docs/troubleshooting.md) for text .LIB license errors, 32-bit target/native CMake selection, normal Conan source-build messages, missing packages, and verifying which cpuv executable your terminal runs. A tool-selection fix does not establish that every upstream library builds with an older GCC; compiler features and catalog support still apply.
 
 ## Configuration
 
