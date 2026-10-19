@@ -20,6 +20,7 @@ mod host_tools;
 mod install;
 mod runner;
 mod source;
+mod toolchains;
 mod uninstall;
 mod update;
 
@@ -138,7 +139,16 @@ enum Action {
         print: bool,
     },
     /// Inspect the compiler ABI fingerprint.
-    Toolchain,
+    Toolchain {
+        #[command(subcommand)]
+        command: Option<toolchains::Action>,
+    },
+    /// Run standalone Conan in the selected compiler/profile's managed home.
+    #[command(disable_help_flag = true)]
+    Conan {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
     /// Compile, link and execute a program with the real compiler and optional flags.
     Doctor {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -171,16 +181,24 @@ fn default_standard() -> String {
 enum Dependency {
     Simple(String),
     Detailed {
+        #[serde(default = "any_version")]
         version: String,
         #[serde(default)]
         linkage: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
     },
+}
+fn any_version() -> String {
+    "*".into()
 }
 impl Dependency {
     fn version(&self) -> Result<&str> {
         match self {
             Self::Simple(v) => Ok(v),
-            Self::Detailed { version, linkage } => {
+            Self::Detailed {
+                version, linkage, ..
+            } => {
                 ensure!(
                     linkage.as_deref().is_none_or(|s| s == "shared"),
                     "Linkage is defined by the selected provider or upstream package metadata; this declaration supports default/shared linkage"
@@ -505,7 +523,15 @@ async fn sync(
         .map_or(cpuv_solver::PREFIX, |p| p.package_prefix.as_str());
     if let Some((names, remove)) = update {
         for input in names {
-            let (name, op, v) = cpuv_solver::split_requirement(input);
+            let reference_name = if input.contains('/') {
+                Some(source::reference_name(input)?)
+            } else {
+                None
+            };
+            let (name, op, v) = reference_name.map_or_else(
+                || cpuv_solver::split_requirement(input),
+                |name| (name, "", ""),
+            );
             if remove {
                 ensure!(
                     manifest.dependencies.remove(name).is_some(),
@@ -522,11 +548,19 @@ async fn sync(
                 }
                 manifest.dependencies.insert(
                     name.into(),
-                    Dependency::Simple(if op.is_empty() {
-                        "*".into()
+                    if reference_name.is_some() {
+                        Dependency::Detailed {
+                            version: "*".into(),
+                            linkage: None,
+                            reference: Some(input.clone()),
+                        }
                     } else {
-                        format!("{op}{v}")
-                    }),
+                        Dependency::Simple(if op.is_empty() {
+                            "*".into()
+                        } else {
+                            format!("{op}{v}")
+                        })
+                    },
                 );
             }
         }
@@ -537,6 +571,7 @@ async fn sync(
         || manifest.backend == Backend::Conan
         || tc.provider.is_none()
         || source::custom_profile_requested()
+        || source::explicit_references(&manifest)
         || changed_compiler
         || cli.reset_profile
     {
@@ -550,7 +585,7 @@ async fn sync(
     }
     ensure!(
         roots.is_empty() || tc.provider.is_some(),
-        "No supported binary-package provider for this GCC ABI ({}; {}; {}). Managed binaries are scoped to MSYS2 UCRT64 x64 POSIX/SEH. Other native GCC builds can use their own libraries.",
+        "No supported binary-package provider for this GCC ABI ({}; {}; {}). Managed binaries require matching MSYS2 UCRT64 or MINGW64 x64 POSIX/SEH profiles. Other native GCC builds can use their own libraries.",
         tc.abi.target_triple,
         tc.runtime_tag(),
         tc.gcc_version
@@ -720,7 +755,8 @@ async fn sync(
     let final_env = root.join(".cpuv/env");
     let link_start = Instant::now();
     let identity = serde_json::to_vec(&(
-        2,
+        3,
+        &tc.provider,
         &tc.abi_hash,
         &tc.compiler_path,
         &manifest.project.std,
@@ -906,15 +942,21 @@ fn configure_environment(
             files: package.files.iter().map(|file| file.path.clone()).collect(),
         })
         .collect();
-    cpuv_relocate::linking::apply(
+    cpuv_relocate::linking::apply_for(
         env,
         &mut metadata,
         &packages,
         &requirements(manifest)?,
         &manifest.link,
+        tc.provider
+            .as_ref()
+            .map_or(cpuv_solver::PREFIX, |provider| {
+                provider.package_prefix.as_str()
+            }),
     )?;
     let inspect_start = Instant::now();
-    let mut inspection = cpuv_relocate::inspect::environment(env, &tc.abi.arch)?;
+    let mut inspection =
+        cpuv_relocate::inspect::environment_for_runtime(env, &tc.abi.arch, &tc.abi.crt_runtime)?;
     inspection["observed_compiler_abi_macros"] = serde_json::to_value(&tc.observed_abi_options)?;
     inspection["fingerprint_semantics"] = serde_json::json!(
         "coarse compatibility filter; equality does not prove binary compatibility"
@@ -992,7 +1034,10 @@ async fn execute(cli: Cli) -> Result<i32> {
     {
         return update::run(options, cli.offline).await;
     }
-    if matches!(cli.command, Action::Toolchain) {
+    if let Action::Toolchain { command } = &cli.command {
+        if let Some(action) = command {
+            return toolchains::execute(action, &cli);
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&cpuv_toolchain::probe(cli.compiler.as_deref())?)?
@@ -1009,6 +1054,9 @@ async fn execute(cli: Cli) -> Result<i32> {
     }
     fs::create_dir_all(&cli.project)?;
     let root = cpuv_toolchain::driver_path(cli.project.canonicalize()?);
+    if let Action::Conan { arguments } = &cli.command {
+        return source::execute(&root, &cli, arguments).await;
+    }
     match &cli.command {
         Action::Init => init(&root, &cli)?,
         Action::Add { packages, needed } => add(&root, &cli, packages, *needed).await?,
@@ -1093,7 +1141,8 @@ async fn execute(cli: Cli) -> Result<i32> {
                 }
             }
         }
-        Action::Toolchain
+        Action::Toolchain { .. }
+        | Action::Conan { .. }
         | Action::Doctor { .. }
         | Action::SelfCommand { .. }
         | Action::Uninstall(_) => unreachable!(),

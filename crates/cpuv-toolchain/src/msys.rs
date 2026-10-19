@@ -11,9 +11,8 @@ fn add_root(roots: &mut BTreeSet<PathBuf>, path: &Path) {
     }
 }
 
-pub(super) fn discover() -> Result<PathBuf> {
+pub(super) fn roots() -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::new();
-    let mut candidates = BTreeSet::new();
     for name in [
         "MSYSTEM_PREFIX",
         "MINGW_PREFIX",
@@ -22,10 +21,6 @@ pub(super) fn discover() -> Result<PathBuf> {
     ] {
         if let Some(path) = std::env::var_os(name) {
             let path = PathBuf::from(path);
-            let compiler = path.join("bin/g++.exe");
-            if compiler.is_file() {
-                candidates.insert(driver_path(compiler.canonicalize()?));
-            }
             add_root(&mut roots, &path);
         }
     }
@@ -55,7 +50,25 @@ pub(super) fn discover() -> Result<PathBuf> {
             }
         }
     }
-    for root in roots {
+    roots
+}
+
+pub(super) fn candidates() -> Result<BTreeSet<PathBuf>> {
+    let mut candidates = BTreeSet::new();
+    for name in [
+        "MSYSTEM_PREFIX",
+        "MINGW_PREFIX",
+        "CPUV_MSYS2_ROOT",
+        "MSYS2_ROOT",
+    ] {
+        if let Some(path) = std::env::var_os(name) {
+            let compiler = PathBuf::from(path).join("bin/g++.exe");
+            if compiler.is_file() {
+                candidates.insert(driver_path(compiler.canonicalize()?));
+            }
+        }
+    }
+    for root in roots() {
         if let Ok(entries) = std::fs::read_dir(root) {
             for entry in entries.take(512).flatten() {
                 let compiler = entry.path().join("bin/g++.exe");
@@ -65,6 +78,11 @@ pub(super) fn discover() -> Result<PathBuf> {
             }
         }
     }
+    Ok(candidates)
+}
+
+pub(super) fn discover() -> Result<PathBuf> {
+    let candidates = candidates()?;
     let mut native = Vec::new();
     let mut preferred = Vec::new();
     for candidate in candidates {

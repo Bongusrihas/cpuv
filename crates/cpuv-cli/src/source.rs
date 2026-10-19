@@ -34,6 +34,37 @@ pub fn custom_profile_requested() -> bool {
         .iter()
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
+
+pub fn explicit_references(manifest: &Manifest) -> bool {
+    manifest.dependencies.values().any(|dependency| {
+        matches!(
+            dependency,
+            Dependency::Detailed {
+                reference: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+pub fn reference_name(reference: &str) -> Result<&str> {
+    let (name, version) = reference
+        .split_once('/')
+        .context("A Conan recipe reference must include name/version")?;
+    ensure!(
+        !name.is_empty()
+            && !version.is_empty()
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-.+".contains(&c))
+            && version
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"_-.+/@#".contains(&c))
+            && !reference.contains("//"),
+        "Invalid Conan recipe reference; use name/version[@user/channel][#revision]"
+    );
+    Ok(name)
+}
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Profile {
     cpp: Vec<String>,
@@ -135,6 +166,9 @@ pub fn requests_locked(root: &Path, manifest: &Manifest, requests: &[String]) ->
         lock.version == 3
             && lock.dependencies == manifest.dependencies
             && requests.iter().all(|request| {
+                if request.contains('/') {
+                    return reference_name(request).is_ok_and(|name| matches!(manifest.dependencies.get(name), Some(Dependency::Detailed { reference: Some(saved), .. }) if saved == request));
+                }
                 let (name, op, value) = cpuv_solver::split_requirement(request);
                 manifest.dependencies.get(name).is_some_and(|dependency| {
                     dependency.version().is_ok_and(|constraint| {
@@ -183,6 +217,21 @@ fn standard(tc: &Toolchain) -> Result<String> {
 }
 
 fn reference(name: &str, dependency: &Dependency) -> Result<String> {
+    if let Dependency::Detailed {
+        reference: Some(value),
+        ..
+    } = dependency
+    {
+        ensure!(
+            reference_name(value)? == name,
+            "Conan reference name disagrees with dependency key {name}"
+        );
+        ensure!(
+            dependency.version()? == "*",
+            "Use the reference's version rather than a separate version constraint"
+        );
+        return Ok(value.clone());
+    }
     ensure!(
         !name.is_empty()
             && name
@@ -243,7 +292,7 @@ fn run(command: &mut Command, log: &Path) -> Result<()> {
             .lines()
             .any(|line| line.starts_with("ERROR: Package '") && line.contains("not resolved:"))
         {
-            "ConanCenter could not resolve this package name/version; see the remote error above for the cause. Resolution failed before compilation, so this error does not establish a GCC, linker, or ABI incompatibility. A package must be published in the selected catalog; cpuv cannot infer an unregistered library's build instructions."
+            "Conan could not resolve this package name/version; see the remote error above for the cause. Resolution failed before compilation, so this error does not establish a GCC, linker, or ABI incompatibility. A package must be published in the selected catalog; cpuv cannot infer an unregistered library's build instructions."
         } else {
             "See the provider error above and the full log for the failed operation. Catalog availability, compiler support, network access, and build requirements are determined by the upstream provider."
         };
@@ -459,16 +508,17 @@ fn prepare_metadata(
             }
         }
         packages.push(cpuv_relocate::linking::PackageFiles {
-            name: cpuv_solver::normalize(name),
+            name: name.to_owned(),
             files,
         });
     }
-    cpuv_relocate::linking::apply(
+    cpuv_relocate::linking::apply_for(
         env,
         &mut metadata,
         &packages,
         &requirements(manifest)?,
         &manifest.link,
+        "",
     )?;
     metadata.dependency_origin = "source".into();
     metadata
@@ -477,7 +527,7 @@ fn prepare_metadata(
     metadata.link_flags.extend(profile.link.clone());
     cpuv_relocate::validate_profile(&metadata, &[])?;
     let inspection =
-        cpuv_relocate::inspect::environment_with_runtime_policy(env, &tc.abi.arch, false)?;
+        cpuv_relocate::inspect::environment_for_runtime(env, &tc.abi.arch, &tc.abi.crt_runtime)?;
     fs::write(
         env.join("compatibility.json"),
         serde_json::to_vec_pretty(&inspection)?,
@@ -508,6 +558,145 @@ fn prepare_metadata(
         }
     }
     Ok(versions)
+}
+
+struct CatalogContext {
+    tc: Toolchain,
+    base: PathBuf,
+    home: PathBuf,
+    tools: tools::Tools,
+    path: OsString,
+    profile_path: PathBuf,
+    key: String,
+    _guard: File,
+}
+
+async fn prepare_context(
+    cli: &Cli,
+    base_tc: &Toolchain,
+    profile: &Profile,
+    standard: &str,
+) -> Result<CatalogContext> {
+    let flags = profile.compiler_flags(standard);
+    let tc = cpuv_toolchain::probe_with_flags(Some(&base_tc.compiler_path), &flags)?;
+    let mut doctor_flags = flags.clone();
+    doctor_flags.extend(profile.link.iter().map(OsString::from));
+    cpuv_toolchain::doctor(&tc, &doctor_flags)?;
+    let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
+    let base = cache_dir(cli)?.join("catalog");
+    fs::create_dir_all(&base)?;
+    let key = blake3::hash(&serde_json::to_vec(&(
+        1,
+        &tc,
+        &profile,
+        standard,
+        archive::digest(&tc.compiler_path)?,
+    ))?)
+    .to_hex()
+    .to_string();
+    let home = base.join("homes").join(&key);
+    fs::create_dir_all(&home)?;
+    let guard = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join("cpuv.lock"))?;
+    guard.try_lock_exclusive().context(
+        "Another catalog operation is using this compiler/profile; retry when it finishes",
+    )?;
+    let tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
+    let mut paths = vec![
+        tc.compiler_path.parent().unwrap().to_owned(),
+        tools.cmake.parent().unwrap().to_owned(),
+        tools.ninja.parent().unwrap().to_owned(),
+    ];
+    if let Some(host) = cpuv_relocate::msys_host_bin(tc.compiler_path.parent().unwrap()) {
+        paths.push(host);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    let path = std::env::join_paths(paths)?;
+    let jobs = cli
+        .build_jobs
+        .map(usize::from)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    let profile_path = home.join("cpuv-profile");
+    fs::write(&profile_path, configure_profile(&tc, profile, &key, jobs)?)?;
+    Ok(CatalogContext {
+        tc,
+        base,
+        home,
+        tools,
+        path,
+        profile_path,
+        key,
+        _guard: guard,
+    })
+}
+
+/// Upstream Conan commands share the exact compiler/profile home used by sync.
+pub async fn execute(root: &Path, cli: &Cli, arguments: &[OsString]) -> Result<i32> {
+    let _project = project_lock(root)?;
+    let tc = cpuv_toolchain::probe(cli.compiler.as_deref())?;
+    let standard = if root.join("cpuv.toml").is_file() {
+        read_manifest(root)?.project.std
+    } else {
+        tc.default_standard()
+    };
+    #[derive(Default, Deserialize)]
+    struct Saved {
+        #[serde(default)]
+        profile: Profile,
+    }
+    let saved: Saved = if root.join("cpuv.lock").is_file() {
+        toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)?
+    } else {
+        Saved::default()
+    };
+    let profile = Profile::environment(if cli.reset_profile {
+        None
+    } else {
+        Some(&saved.profile)
+    })?;
+    let context = prepare_context(cli, &tc, &profile, &standard).await?;
+    let profiles = context.home.join("profiles");
+    fs::create_dir_all(&profiles)?;
+    write_atomic(&profiles.join("default"), &fs::read(&context.profile_path)?)?;
+    let mut upstream = command(&context.tools.conan, &context.home, &context.path);
+    upstream.current_dir(root);
+    if arguments.is_empty() {
+        upstream.arg("--help");
+    } else {
+        upstream.args(arguments);
+    }
+    if cli.offline {
+        let action = arguments
+            .first()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        if ["install", "create", "build"].contains(&action.as_ref()) {
+            upstream.arg("--no-remote");
+        } else {
+            ensure!(
+                ["", "--help", "--version", "export", "profile", "cache"]
+                    .contains(&action.as_ref())
+                    || (action == "remote" && arguments.get(1).is_some_and(|s| s == "list")),
+                "For other Conan commands use upstream offline flags explicitly without cpuv --offline"
+            );
+        }
+    }
+    eprintln!(
+        "Conan home: {}\nDefault profile: {}",
+        context.home.display(),
+        context.profile_path.display()
+    );
+    Ok(upstream
+        .status()
+        .context("Starting standalone Conan")?
+        .code()
+        .unwrap_or(1))
 }
 
 pub async fn sync(
@@ -550,53 +739,16 @@ pub async fn sync(
     } else {
         saved.as_ref().map(|value| &value.profile)
     })?;
-    let flags = profile.compiler_flags(&manifest.project.std);
-    let tc = cpuv_toolchain::probe_with_flags(Some(&base_tc.compiler_path), &flags)?;
-    let mut doctor_flags = flags.clone();
-    doctor_flags.extend(profile.link.iter().map(OsString::from));
-    cpuv_toolchain::doctor(&tc, &doctor_flags)?;
-    let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
-    let base = cache_dir(cli)?.join("catalog");
-    fs::create_dir_all(&base)?;
-    let key = blake3::hash(&serde_json::to_vec(&(
-        1,
-        &tc,
-        &profile,
-        &manifest.project.std,
-        archive::digest(&tc.compiler_path)?,
-    ))?)
-    .to_hex()
-    .to_string();
-    let home = base.join("homes").join(&key);
-    fs::create_dir_all(&home)?;
-    let guard = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(home.join("cpuv.lock"))?;
-    guard.try_lock_exclusive().context(
-        "Another catalog operation is using this compiler/profile; retry when it finishes",
-    )?;
-    let tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
-    let mut paths = vec![
-        tc.compiler_path.parent().unwrap().to_owned(),
-        tools.cmake.parent().unwrap().to_owned(),
-        tools.ninja.parent().unwrap().to_owned(),
-    ];
-    if let Some(host) = cpuv_relocate::msys_host_bin(tc.compiler_path.parent().unwrap()) {
-        paths.push(host);
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&path));
-    }
-    let path = std::env::join_paths(paths)?;
-    let jobs = cli
-        .build_jobs
-        .map(usize::from)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
-    let profile_path = home.join("cpuv-profile");
-    fs::write(&profile_path, configure_profile(&tc, &profile, &key, jobs)?)?;
+    let CatalogContext {
+        tc,
+        base,
+        home,
+        tools,
+        path,
+        profile_path,
+        key,
+        _guard,
+    } = prepare_context(cli, base_tc, &profile, &manifest.project.std).await?;
     let stage = tempfile::Builder::new()
         .prefix("stage-catalog-")
         .tempdir_in(root.join(".cpuv"))?;
@@ -668,7 +820,7 @@ pub async fn sync(
         install.arg(stage.path().join("conanfile.txt"));
     }
     eprintln!(
-        "Resolving through ConanCenter using GCC {} ({}). Build log: {}",
+        "Resolving through Conan using GCC {} ({}). Build log: {}",
         tc.gcc_version,
         tc.runtime_tag(),
         log.display()
@@ -748,7 +900,7 @@ pub fn info(root: &Path) -> Result<()> {
     let lock: CatalogLock = toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)
         .context("Legacy source lock; run cpuv sync to migrate to the community catalog")?;
     println!(
-        "Backend: ConanCenter\nCompiler recorded by lock: GCC {}",
+        "Backend: Conan (configured remotes and local recipes)\nCompiler recorded by lock: GCC {}",
         lock.gcc_version
     );
     for (name, version) in lock.packages {

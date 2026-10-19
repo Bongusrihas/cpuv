@@ -1,6 +1,6 @@
 # Community catalog installation
 
-cpuv uses compatible MSYS2 UCRT64 packages first. A missing package, another native MinGW GCC profile, custom flags, or --catalog selects ConanCenter for the entire environment. There is no cpuv library recipe file to create.
+cpuv uses compatible MSYS2 UCRT64 or MINGW64 packages first. A missing package, another native MinGW GCC profile, custom flags, or --catalog selects ConanCenter for the entire environment. There is no cpuv library recipe file to create.
 
 For automatic fallback, a negative lookup from a cached MSYS2 index is refreshed once online before choosing ConanCenter. A newly downloaded index is not fetched a second time for the same operation, and offline mode never refreshes. Refresh errors are reported as unconfirmed availability rather than absence. cpuv lists the missing requirements; if fallback fails, its error retains the MSYS2 lookup and similar names along with the provider log. Suggestions come from that repository and do not select or alias a package. Published names and versions can differ between providers; package existence in another ecosystem is not proof of MSYS2 or ConanCenter availability. Catalog name/version resolution occurs before compilation, so a resolution failure alone is not evidence of ABI or linker incompatibility.
 
@@ -64,3 +64,7 @@ Conan recipes execute Python code with your permissions, including binary resolu
 - [Conan install](https://docs.conan.io/2/reference/commands/install.html)
 - [PkgConfigDeps interfaces](https://docs.conan.io/2/reference/tools/gnu/pkgconfigdeps.html)
 - [Deployers](https://docs.conan.io/2/reference/extensions/deployers.html)
+
+## Additional Conan remotes and recipes
+
+cpuv conan exposes upstream remote, export, create, profile, and cache commands in the same managed compiler/profile home used by synchronization. Default profiles select that GCC and saved flags. Full recipe references (name/version@user/channel, optionally #revision) can be passed to cpuv add or declared with a reference field in a dependency table. They select Conan for the whole graph; distribute private/local recipes separately from cpuv.lock. See [Windows providers and toolchains](windows-providers.md) for commands and trust boundaries.

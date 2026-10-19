@@ -1,23 +1,23 @@
 # Compiler, linker, and ABI compatibility
 
-Version **0.0.2** does not support every possible Windows/GCC/linker/ABI combination. Installing g++ alone does not guarantee that a precompiled dependency is compatible.
+Version **0.0.3** does not support every possible Windows/GCC/linker/ABI combination. Installing g++ alone does not guarantee that a precompiled dependency is compatible.
 
 ## Application platform
 
-The prebuilt cpuv application targets Windows 10 or newer on x86-64. It does not require Rust, Cargo, Git, or a separate Visual C++ runtime installation. Building cpuv from source requires Rust and its platform build tools. Compiling C++ programs requires a separate working GCC toolchain; cpuv does not install or bundle GCC.
+The prebuilt cpuv application targets Windows 10 or newer on x86-64. It does not require Rust, Cargo, Git, or a separate Visual C++ runtime installation. Building cpuv from source requires Rust and its platform build tools. Compiling C++ programs requires a separate working GCC toolchain; cpuv can install GCC through an existing MSYS2 host; it does not bundle GCC or bootstrap MSYS2.
 
 ## Supported combinations
 
-| Component | Version 0.0.2 boundary |
+| Component | Version 0.0.3 boundary |
 | --- | --- |
-| Compiler discovery | Explicit executable, CPUV_CXX/CXX, PATH, then discovered MSYS2 installation roots and Windows registration |
+| Compiler discovery | Explicit executable, CPUV_CXX/CXX, a verified cpuv selection, PATH, then discovered MSYS2 installation roots and Windows registration |
 | Native compilation | Recognized GCC distributions use their own compiler/runtime; language defaults adapt to observed capabilities |
-| Managed prebuilt dependencies | MSYS2 UCRT64, x86-64, POSIX threads, SEH exceptions, libstdc++ dual ABI 1, with matching runtime package versions |
+| Managed prebuilt dependencies | MSYS2 UCRT64/UCRT or MINGW64/MSVCRT, x86-64, POSIX threads, SEH exceptions, dual ABI 1, with matching runtime packages |
 | Source dependencies | ConanCenter packages built/reused with the selected native MinGW GCC and saved profile; package/compiler support comes from upstream metadata |
 | Linker | Selected and invoked by GCC; must support the target, object format, runtime, and driver options |
-| Other C++ ecosystems | MSVC, Clang, other managed binary providers, and cross-OS compilation are outside this release |
+| Other C++ ecosystems | MSVC, Clang, Nix/WSL, and other binary/cross-OS providers are outside this release |
 
-When a compiler has no supported binary provider, the repository runtime does not match, or a custom profile is requested, cpuv selects ConanCenter. Every dependency must exist there and support that compiler's features. An older GCC cannot build a library requiring an unsupported language mode. No incompatible UCRT64 binary is silently substituted for an absent or unsupported catalog package.
+When a compiler has no supported binary provider, the repository runtime does not match, or a custom profile is requested, cpuv selects Conan; its managed remotes and exported recipes can supplement ConanCenter. Every dependency must exist there and support that compiler's features. An older GCC cannot build a library requiring an unsupported language mode. No incompatible UCRT64 binary is silently substituted for an absent or unsupported catalog package.
 
 ## Why any ABI is not possible
 
@@ -42,3 +42,5 @@ cpuv supplies the planned include directories, library directories, definitions,
 Catalog mode bootstraps standalone Conan, CMake, and Ninja into the cache. It requires no system Python or Rust. ConanCenter maintains package build instructions; cpuv contains no per-library recipes. Some upstream builds need additional system tools. Cygwin and cross-OS catalog builds are not supported by this adapter. See [catalog installation](source-builds.md).
 
 Open-source licensing gives users the right to inspect, modify, build, and redistribute cpuv under Apache-2.0. It does not imply universal binary compatibility. The repository contains all first-party implementation code; third-party dependencies retain their own licenses.
+
+See [Windows providers and toolchains](windows-providers.md) for compiler installation/selection, separate CRT policies, custom remotes, and full Conan recipe references.

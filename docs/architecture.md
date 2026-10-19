@@ -1,18 +1,18 @@
 # cpuv technical architecture and engineering specification
 
-**Software version:** 0.0.2. **Specification revision:** 1.3, shared community catalog.
+**Software version:** 0.0.3. **Specification revision:** 1.4, Windows toolchains and configurable Conan catalogs.
 
 **Author:** Bongu srihas. **Co-authors:** Gemini 4 argon and GPT-6 sol.
 
-This document describes the implemented version 0.0.2 architecture, its supported compatibility boundary, and the responsibilities of each component. All first-party runtime implementation is included in this source distribution.
+This document describes the implemented version 0.0.3 architecture, its supported compatibility boundary, and the responsibilities of each component. All first-party runtime implementation is included in this source distribution.
 
 ## 1. Supported boundary
 
-The managed binary ecosystem is MSYS2 UCRT64 on Windows x64: GNU GCC, UCRT, POSIX threads, SEH, and libstdc++ dual ABI 1. A compiler is discovered from an explicit selection, CPUV_CXX, CXX, or PATH. There is no personal installation path in the source. Other supported native MinGW GCC profiles use their own compiler/runtime through the ConanCenter adapter. Missing MSYS2 packages use the same automatic fallback.
+Managed MSYS2 binary environments are UCRT64/UCRT and MINGW64/MSVCRT on Windows x64 with POSIX threads, SEH, and libstdc++ dual ABI 1. Compiler discovery checks explicit selection, CPUV_CXX, CXX, a saved cpuv toolchain selection, and PATH. There is no personal installation path in the source. Other supported native MinGW GCC profiles use their own compiler/runtime through the ConanCenter adapter. Missing MSYS2 packages use the same automatic fallback.
 
-vcpkg, unregistered GitHub C++ archives, MINGW64 binary packages, MSVC/Clang integration, Cygwin catalog builds, and cross-platform binary relocation are deferred. MSYS2 resolution uses one rolling repository snapshot. ConanCenter resolution uses its upstream dependency metadata and revision lock.
+vcpkg, unregistered GitHub C++ archives, Nix/WSL, MSVC/Clang integration, Cygwin catalog builds, and cross-platform binary relocation are deferred. MSYS2 resolution uses one rolling repository snapshot. ConanCenter resolution uses its upstream dependency metadata and revision lock.
 
-The standalone cpuv executable embeds its Rust code and statically links its Microsoft C runtime. Users need no Rust, Cargo, Git, or PowerShell to use native setup. They still need GCC to compile C++ programs; cpuv does not bundle or install GCC.
+The standalone cpuv executable embeds its Rust code and statically links its Microsoft C runtime. Users need no Rust, Cargo, Git, or PowerShell to use native setup. They still need GCC to compile C++ programs; cpuv can install GCC through an existing MSYS2 pacman host but does not bundle GCC or bootstrap MSYS2.
 
 ## 2. Dependency and linking authority
 
@@ -61,7 +61,7 @@ Paths, unsafe links, device names, collisions, and cross-prefix payload are vali
 
 Relocated metadata is privately copied before editing shared content. Project/package locks coordinate operations. A staged environment is committed with rollback on normal errors; this is not a crash-proof transaction against all filesystem or power failures. Cached hardlinked files must be treated as immutable.
 
-Checksums verify agreement with the index, not the authenticity of a compromised repository. Package signature verification and a complete software supply-chain trust policy remain outside version 0.0.2.
+Checksums verify agreement with the index, not the authenticity of a compromised repository. Package signature verification and a complete software supply-chain trust policy remain outside version 0.0.3.
 
 ### Shared community catalog pipeline
 
@@ -97,7 +97,7 @@ Package size, file count, network, disk, antivirus, and compiler startup affect 
 
 ## 8. Source and extension boundary
 
-The source tree contains the CLI, generic catalog adapter and pinned tool bootstrap, toolchain probe, resolver, fetch pipeline, content store, relocation/linking/inspection code, compiler shim, native installer, self updater, and application uninstaller. Cargo manifests and Cargo.lock describe third-party dependencies. Build and packaging scripts are included; test suites, development fixtures, generated PDFs, and recorded benchmarks are excluded.
+The source tree contains the CLI, generic catalog adapter and pinned tool bootstrap, toolchain probe, resolver, fetch pipeline, content store, relocation/linking/inspection code, compiler shim, native installer, self updater, application uninstaller, and native toolchain manager. Cargo manifests and Cargo.lock describe third-party dependencies. Build and packaging scripts are included; test suites, development fixtures, generated PDFs, and recorded benchmarks are excluded.
 
 cpuv rm (also remove) edits direct project requirements and synchronizes the remaining dependency graph. cpuv uninstall operates independently of project initialization or compiler discovery: it identifies the invoked installation and recognized helpers, stages helper removal, edits eligible user PATH entries, and schedules native Windows executable deletion. Preparation failures restore staged files and attempt conditional PATH rollback. Shared tool directories, other binaries, project environments, and caches are preserved. See the [uninstall implementation update](project-encyclopedia/APPLICATION_UNINSTALL_UPDATE.md).
 
@@ -109,3 +109,7 @@ Windows CI checks formatting, Clippy, and compilation. The release workflow crea
 - GCC specs: https://gcc.gnu.org/onlinedocs/gccint/Spec-Files.html
 - pkg-config: https://www.freedesktop.org/wiki/Software/pkgconfig/
 - MSYS2 environments: https://www.msys2.org/docs/environments/
+
+## Windows provider extensions in 0.0.3
+
+Observed x86-64 POSIX/SEH GCC profiles select UCRT64 for UCRT or MINGW64 for MSVCRT, with separate namespaces and opposing-runtime import checks. Nested archive inspection covers catalog deployments. The toolchain module discovers pacman-capable hosts, delegates explicit GCC/package installation to upstream pacman, and saves verified compiler selection without editing PATH. The Conan command and synchronization paths share one context builder, compiler/profile home, and lock. Full recipe references force a whole-graph Conan resolution; upstream remotes, recipes, and revisions remain authoritative. See [Windows providers](windows-providers.md).

@@ -2,7 +2,7 @@
 
 A clean C++ package and run workflow for Windows GCC.
 
-**Version 0.0.2 · Windows · Apache-2.0**
+**Version 0.0.3 · Windows · Apache-2.0**
 
 cpuv manages native C++ dependencies, prepares a project environment, and compiles and runs your code with one command. Downloaded packages live in a shared cache. Generated programs and compiler artifacts stay in the hidden .cpuv directory.
 
@@ -12,7 +12,9 @@ cpuv manages native C++ dependencies, prepares a project environment, and compil
 - SHA-256 archive verification, retries, an offline cache, and a BLAKE3 content-addressed store.
 - Hardlink-based project environments, with a copy fallback.
 - Automatic compiler discovery and an ABI fingerprint for each environment.
-- One managed binary ecosystem: MSYS2 UCRT64, selected from the detected compiler.
+- MSYS2 UCRT64 and MINGW64 binary environments selected from the observed GCC runtime.
+- Toolchain discovery, MSYS2-backed GCC installation, and verified compiler selection.
+- Native Conan commands for remotes, upstream/local recipes, and full recipe references.
 - Automatic ConanCenter fallback for missing MSYS2 packages and other native GCC profiles, without cpuv library recipes.
 - Automatic compilation and execution, without EXE or DLL files scattered across your source directory.
 - Exact package names from upstream catalogs, with no cpuv library aliases or named linker defaults.
@@ -24,7 +26,7 @@ cpuv manages native C++ dependencies, prepares a project environment, and compil
 
 Installing and using the prebuilt application requires no Rust, Cargo, Git, or Visual C++ runtime installation. GCC is needed to compile your C++ programs, not to install cpuv. The current release executable targets 64-bit x86 Windows.
 
-Compatible MSYS2 UCRT64 compilers can use prebuilt packages. Missing packages, other supported native MinGW GCC profiles, and custom ABI flags use ConanCenter automatically. cpuv bootstraps standalone Conan, CMake, and Ninja; this does not require a system Python or Rust installation. Upstream catalog metadata supplies dependencies, build steps, and interfaces. A package must exist in that catalog and support the selected compiler. vcpkg, arbitrary GitHub archives, MSVC, and Clang adapters are outside this release.
+Compatible MSYS2 UCRT64 and MINGW64 compilers can use prebuilt packages. Missing packages, other supported native MinGW GCC profiles, and custom ABI flags use ConanCenter automatically. cpuv bootstraps standalone Conan, CMake, and Ninja; this does not require a system Python or Rust installation. Upstream catalog metadata supplies dependencies, build steps, and interfaces. A package must exist in that catalog and support the selected compiler. vcpkg, arbitrary GitHub archives, MSVC, and Clang adapters are outside this release.
 
 ## Install
 
@@ -64,13 +66,35 @@ cpuv uninstall
 
 The command removes the invoked executable, matching copies in cpuv's standard per-user install locations, and recognized cpuv helpers. Dedicated installation-directory entries are removed from the user PATH. Shared directories such as .local/bin stay on PATH when other files/tools remain. Project source, .cpuv environments, GCC, and dependency caches are preserved. A custom or portable invocation affects that installation only; different binaries in other locations are reported and preserved. Open a new terminal afterward. Use cpuv rm PACKAGE to remove a project dependency instead.
 
-Self update downloads the latest published stable GitHub release, verifies its checksum and executable version, and safely replaces the invoked Windows executable. It requires no Rust or PowerShell. Use --version 0.0.2 to select a release, or --force to reinstall the same version or explicitly request a downgrade. Other copies of cpuv on disk are not updated. Project environments and dependency caches are preserved. A separate compiler-shim download is unnecessary.
+Self update downloads the latest published stable GitHub release, verifies its checksum and executable version, and safely replaces the invoked Windows executable. It requires no Rust or PowerShell. Use --version 0.0.3 to select a release, or --force to reinstall the same version or explicitly request a downgrade. Other copies of cpuv on disk are not updated. Project environments and dependency caches are preserved. A separate compiler-shim download is unnecessary.
 
 For a custom location, set CPUV_INSTALL_DIR before the one-command install, or run the downloaded setup executable with options:
 
 ~~~powershell
 .\cpuv-setup.exe --install-dir "$HOME\tools\cpuv" --no-path
 ~~~
+
+## Windows toolchains and Conan recipes
+
+```powershell
+cpuv toolchain list
+cpuv toolchain install --environment ucrt64 --dry-run
+cpuv toolchain install --environment ucrt64
+cpuv toolchain install --environment mingw64
+```
+
+Toolchain installation uses a discovered MSYS2 host, its package metadata, and pacman. It does not assume a drive or username. GCC need not be installed yet; MSYS2 with pacman is required. Use --root DIRECTORY when multiple installations exist. Add --use to select the installed compiler, or use cpuv toolchain use PATH; cpuv toolchain reset clears that selection. Windows PATH stays unchanged. See [Windows providers and toolchains](docs/windows-providers.md) for precedence and compatibility boundaries.
+
+After cpuv init, native Conan commands use that project's selected compiler/profile:
+
+```powershell
+cpuv conan remote list
+cpuv conan export .\vendor\library --user myteam --channel stable
+cpuv conan create .\vendor\library --user myteam --channel stable --build=missing
+cpuv add 'library/1.2.3@myteam/stable'
+```
+
+Replace the example recipe path/reference with the actual package. Remotes, authentication, recipes, create/build, and cache commands are supplied by standalone Conan. Full recipe references select Conan automatically and remain in the project manifest. There are no library-specific cpuv recipes. Nix/Linux packages are outside this Windows release. Recipe code runs with your permissions; use trusted sources.
 
 ## Your first program
 
@@ -173,9 +197,10 @@ Raw compiler use follows normal GCC output conventions. Use cpuv run g++ for man
 | Compiler environment | Native compile/run | Dependency installation |
 | --- | --- | --- |
 | MSYS2 UCRT64, x86-64, POSIX threads, SEH, libstdc++ dual ABI 1 | Supported | Matching UCRT64 binaries, or ConanCenter |
-| MSYS2 MINGW64 / standalone MinGW-w64 | Native compiler and runtime retained | ConanCenter with the selected GCC profile |
+| MSYS2 MINGW64, x86-64, POSIX, SEH, dual ABI 1 | MSVCRT compiler and runtime retained | Matching MINGW64 binaries or Conan |
+| Standalone MinGW-w64 | Native compiler and runtime retained | Conan with the selected GCC profile |
 | Other recognized native Windows GCC distributions or versions | Native compile/run with that compiler; library feature requirements still apply | ConanCenter packages supporting that compiler; no universal ABI guarantee |
-| MSVC, Clang, non-Windows hosts, or cross-compilers targeting another OS | Outside version 0.0.2 | Outside version 0.0.2 |
+| MSVC, Clang, non-Windows hosts, or cross-compilers targeting another OS | Outside version 0.0.3 | Outside version 0.0.3 |
 
 cpuv detects GCC's version, target, architecture, runtime, thread model, exception model, libstdc++ ABI, and supported C++ language level. It records additional compiler ABI macros as evidence. It does not require one GCC version for native compilation. The initial language standard adapts to the detected GCC version and can be changed in cpuv.toml.
 
@@ -211,7 +236,7 @@ cpuv doctor compiles, links, and runs a small program using the actual driver. U
 | Setting | Purpose |
 | --- | --- |
 | --compiler PATH | Select the compiler for toolchain discovery and environment creation |
-| CPUV_CXX, then CXX | Compiler selection before searching PATH; specify an executable, without shell flags |
+| CPUV_CXX, then CXX | Compiler selection before cpuv selection/PATH; specify an executable, without shell flags |
 | CPUV_MSYS2_ROOT / MSYS2_ROOT | Help discover an unregistered MSYS2 installation when g++ is absent from PATH |
 | -C DIRECTORY | Work in another project directory |
 | --cache-dir DIRECTORY | Override the shared cache location |
@@ -233,7 +258,7 @@ cpuv doctor compiles, links, and runs a small program using the actual driver. U
 
 Run cpuv --help or cpuv COMMAND --help for the complete options. Use cpuv toolchain to inspect the detected compiler and provider. Compiler paths inside generated environment metadata are local to that machine; regenerate the environment after relocating or replacing the compiler.
 
-Without a compiler on PATH, discovery checks MSYS2 environment roots, Windows installation records, and bounded marker-based searches beneath system/profile/program directories. A recognized UCRT64 compiler is preferred for the binary provider; ambiguous candidates require --compiler. No drive, username, or MSYS2 installation directory is embedded in code.
+Without a compiler on PATH, discovery checks MSYS2 environment roots, Windows installation records, and bounded marker-based searches beneath system/profile/program directories. Saved cpuv selection precedes PATH discovery. Recognized UCRT64 or MINGW64 compilers can use their own binary provider; ambiguous candidates require --compiler. No drive, username, or MSYS2 installation directory is embedded in code.
 
 MSYS2 packages and cpuv bootstrap tools share the configurable archive limits. ConanCenter package/source transfers use Conan's own downloader and extraction policy; these cpuv byte/time limits do not wrap upstream recipe downloads. A 2 GiB archive fits within the defaults; larger requirements can raise --max-download-mib and --max-extract-mib. The 64 MiB repository-index limit bounds metadata held in memory and does not cap library archives. Connection and idle-read timeouts remain active even when the overall transfer deadline is disabled. File checksums and indexed sizes remain mandatory.
 
@@ -285,7 +310,7 @@ Performance depends on the package graph, cache verification, disk, network, and
 
 ## Scope and security
 
-Version 0.0.2 uses MSYS2 indexes or ConanCenter metadata. The MSYS2 path verifies archive SHA-256 checksums and validates extraction paths without executing package hooks. Conan executes upstream Python recipes and build code with your permissions, even when it downloads a binary. Its downloader and cache formats are owned by Conan; cpuv checks Conan cache integrity before and after installation and inventories deployed output. Explicit host tooling uses pacman normally. Package signatures, sandboxed/hermetic builds, and universal ABI conversion are not implemented. Use trusted catalogs and upstream sources. Compiler response files are not supported by managed output rewriting.
+Version 0.0.3 uses MSYS2 indexes or ConanCenter metadata. The MSYS2 path verifies archive SHA-256 checksums and validates extraction paths without executing package hooks. Conan executes upstream Python recipes and build code with your permissions, even when it downloads a binary. Its downloader and cache formats are owned by Conan; cpuv checks Conan cache integrity before and after installation and inventories deployed output. Explicit host tooling uses pacman normally. Package signatures, sandboxed/hermetic builds, and universal ABI conversion are not implemented. Use trusted catalogs and upstream sources. Compiler response files are not supported by managed output rewriting.
 
 ## Credits and license
 
@@ -293,6 +318,6 @@ Version 0.0.2 uses MSYS2 indexes or ConanCenter metadata. The MSYS2 path verifie
 
 **Co-authors:** Gemini 4 argon and GPT-6 sol
 
-**Version:** 0.0.2
+**Version:** 0.0.3
 
 Licensed under [Apache-2.0](LICENSE). Third-party compilers and packages retain their own licenses. See [AUTHORS.md](AUTHORS.md) and [NOTICE](NOTICE).

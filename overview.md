@@ -1,6 +1,6 @@
 # Architecture overview
 
-cpuv 0.0.2 manages Windows GCC dependencies and compilation. It discovers the real compiler, selects one package provider, prepares a hidden environment, and compiles and executes programs using package metadata.
+cpuv 0.0.3 manages Windows GCC dependencies and compilation. It discovers the real compiler, selects one package provider, prepares a hidden environment, and compiles and executes programs using package metadata.
 
 ```mermaid
 flowchart TD
@@ -22,7 +22,7 @@ flowchart TD
 
 | Crate | Responsibility |
 | --- | --- |
-| cpuv-cli | Commands, catalog adapter, locks, tool bootstrap, managed run, native setup, self update and uninstall |
+| cpuv-cli | Commands, catalog adapter, locks, tool bootstrap, managed run, native setup, self update, uninstall, and toolchain management |
 | cpuv-toolchain | GCC discovery, macro probes, language capabilities, ABI observations, provider eligibility |
 | cpuv-solver | MSYS2 constraints, virtual providers, package-name suggestions |
 | cpuv-fetch | MSYS2 metadata and parallel downloads, retries, size/time limits, offline behavior |
@@ -34,11 +34,11 @@ All first-party runtime code is included. The CLI creates its shim from its own 
 
 ## Toolchain and providers
 
-Discovery checks an explicit executable, CPUV_CXX, CXX, PATH, then discovered MSYS2 roots and Windows records. Generated shims are excluded. No personal path or compiler installation directory is embedded in code. Detected paths belong in local metadata.
+Discovery checks an explicit executable, CPUV_CXX, CXX, a verified cpuv selection, PATH, then discovered MSYS2 roots and Windows records. Generated shims are excluded. No personal path or compiler installation directory is embedded in code. Detected paths belong in local metadata.
 
 The probe records version, target, architecture, C runtime, threads, exceptions, libstdc++ version/dual ABI, language capabilities, and ABI macros. cpuv doctor compiles, links, and runs a real probe. GCC invokes its own linker; incompatible object formats and arbitrary linkers cannot be translated.
 
-MSYS2 binaries require a recognized UCRT64 x86-64 POSIX/SEH profile, dual ABI 1, and matching runtime packages. This path uses one rolling snapshot, SHA-256 checks, bounded extraction, shared content storage, and staged hardlink materialization. Pacman hook metadata is discarded. Explicit base-devel installation delegates to host pacman outside the project transaction.
+MSYS2 binaries require a recognized UCRT64/UCRT or MINGW64/MSVCRT x86-64 POSIX/SEH profile, dual ABI 1, and matching runtime packages. This path uses one rolling snapshot, SHA-256 checks, bounded extraction, shared content storage, and staged hardlink materialization. Pacman hook metadata is discarded. Explicit base-devel installation delegates to host pacman outside the project transaction.
 
 Missing packages, other supported native MinGW profiles, custom flags, and --catalog select ConanCenter for the whole graph. Standalone Conan/CMake/Ninja bootstrap without system Python or Rust. Upstream metadata supplies versions, dependencies, build systems, sources, tools, and interfaces. Compatible packages are reused; missing binaries build with the selected GCC. --from-source forces source builds including build requirements.
 
@@ -76,4 +76,8 @@ Checksums identify content rather than authenticate a compromised publisher. Con
 
 ## Credits
 
-Author: **Bongu srihas**. Co-authors: **Gemini 4 argon** and **GPT-6 sol**. Version: **0.0.2**. Apache-2.0; upstream packages retain their licenses.
+Author: **Bongu srihas**. Co-authors: **Gemini 4 argon** and **GPT-6 sol**. Version: **0.0.3**. Apache-2.0; upstream packages retain their licenses.
+
+## Windows extensions in 0.0.3
+
+UCRT64 and MINGW64 are selected from compiler observations and remain separate binary graphs with runtime import policies. Native toolchain installation uses a discovered MSYS2 pacman host; verified selection is recorded in per-user storage. cpuv conan shares the saved compiler/profile home with add/sync, enabling upstream remote, recipe export/create, and cache commands. Full Conan references are stored in the manifest and force a catalog graph. See [Windows providers and toolchains](docs/windows-providers.md).

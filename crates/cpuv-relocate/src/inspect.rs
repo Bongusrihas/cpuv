@@ -24,6 +24,14 @@ pub fn environment_with_runtime_policy(
     arch: &str,
     require_ucrt: bool,
 ) -> Result<serde_json::Value> {
+    environment_for_runtime(env, arch, if require_ucrt { "ucrt" } else { "unknown" })
+}
+
+pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<serde_json::Value> {
+    ensure!(
+        ["ucrt", "msvcrt", "unknown"].contains(&runtime),
+        "Unsupported Windows runtime {runtime}"
+    );
     let expected = match arch {
         "x86_64" => 0x8664,
         "x86" => 0x14c,
@@ -63,13 +71,16 @@ pub fn environment_with_runtime_policy(
                 .iter()
                 .map(|import| (import.dll.to_ascii_lowercase(), import.name.to_string()))
                 .collect();
-            // MSVCRT is incompatible with this managed UCRT64 provider. Windows OS
-            // libraries may use it internally; this check concerns package imports.
+            // Inspect direct package imports; OS implementation dependencies are
+            // outside this check. GCC providers cannot reuse an opposing CRT.
             ensure!(
-                !require_ucrt
-                    || !imports.iter().any(|(dll, _)| dll == "msvcrt.dll"
-                        || dll.starts_with("vcruntime")
-                        || dll.starts_with("msvcp")),
+                !imports.iter().any(|(dll, _)| {
+                    (runtime == "ucrt" && dll == "msvcrt.dll")
+                        || (runtime == "msvcrt"
+                            && (dll == "ucrtbase.dll" || dll.starts_with("api-ms-win-crt-")))
+                        || (runtime != "unknown"
+                            && (dll.starts_with("vcruntime") || dll.starts_with("msvcp")))
+                }),
                 "Package binary imports an unsupported C/C++ runtime: {}",
                 path.display()
             );
@@ -83,7 +94,7 @@ pub fn environment_with_runtime_policy(
                     .filter_map(|export| export.name.map(str::to_owned))
                     .collect(),
             });
-        } else if (ext == "a" || ext == "lib") && path.strip_prefix(env)?.starts_with("lib") {
+        } else if ext == "a" || ext == "lib" {
             let data = fs::read(path)?;
             let archive = goblin::archive::Archive::parse(&data)
                 .with_context(|| format!("Unsupported library archive {}", path.display()))?;

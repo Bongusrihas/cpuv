@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.3 — 2026-10-19
+
+- Add MSYS2 MINGW64 binary selection for observed compatible MSVCRT GCC profiles, separate from UCRT64.
+- Add toolchain list/install/use/reset commands, pacman-capable host discovery, dry-run/offline installation, and verified compiler selection without PATH edits.
+- Expose standalone Conan commands using the same managed compiler/profile home as add/sync, including remotes and recipe export/create.
+- Accept full Conan recipe references and manifest reference declarations without package-specific build rules.
+- Enforce opposing CRT import policies and inspect nested library archives in provider deployments.
+- Keep package metadata/build recipes upstream; exclude Nix/WSL from this Windows release.
+
 ## 0.0.2 — 2026-10-18
 
 - Refresh cached negative MSYS2 package lookups once online before automatic catalog fallback; retain offline behavior and preserve the cache on refresh failure.

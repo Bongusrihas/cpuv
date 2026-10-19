@@ -2,6 +2,8 @@
 
 An engineering knowledge base for the inspected cpuv implementation: purpose, source structure, execution, schemas, trust, operations, history, and limitations.
 
+**2026-10-19 update:** [Windows providers and toolchains](WINDOWS_PROVIDERS_UPDATE.md) describes version 0.0.3: MINGW64, native compiler management, namespace-aware linking, nested archive inspection, and direct Conan remotes/recipes. The baseline inventories below retain their original audit dates; see the [current provider guide](../windows-providers.md) for supported workflows.
+
 **2026-10-18 update:** [Application uninstall](APPLICATION_UNINSTALL_UPDATE.md) adds `cpuv uninstall` and `--dry-run`, with native executable/helper removal and conservative user PATH cleanup. The chapters, hashes, counts, and audit results below retain their dated 2026-10-17 baseline; earlier “not found” uninstall statements describe that baseline rather than the updated application. The update documents the new source and verification separately.
 
 **Release documentation:** [v0.0.2 release notes](../release-notes/v0.0.2.md) describe the catalog adapter, dependency removal, application uninstall, and current distribution. Statements about an uncommitted tree or unpublished release in the baseline chapters refer to the original audit date; they are not live GitHub release status.

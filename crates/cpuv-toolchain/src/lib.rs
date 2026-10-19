@@ -35,7 +35,18 @@ pub struct Provider {
     pub database: String,
 }
 impl Provider {
-    fn msys2(name: &str, prefix: &str) -> Self {
+    pub fn msys2(environment: &str) -> Result<Self> {
+        let prefix = match environment {
+            "ucrt64" => "mingw-w64-ucrt-x86_64-",
+            "mingw64" => "mingw-w64-x86_64-",
+            _ => {
+                bail!("Unsupported GCC binary environment {environment}; choose ucrt64 or mingw64")
+            }
+        };
+        Ok(Self::msys2_namespace(environment, prefix))
+    }
+
+    fn msys2_namespace(name: &str, prefix: &str) -> Self {
         Self {
             name: name.into(),
             repository: format!("https://repo.msys2.org/mingw/{name}"),
@@ -112,10 +123,60 @@ pub fn discover(explicit: Option<&Path>) -> Result<PathBuf> {
             return locate(Path::new(&path)).with_context(|| format!("Resolving {key}"));
         }
     }
+    if let Ok(selection) = selection_file()
+        && selection.is_file()
+    {
+        #[derive(Deserialize)]
+        struct Selection {
+            compiler: PathBuf,
+        }
+        let selected: Selection = serde_json::from_slice(&std::fs::read(&selection)?)
+            .context("Invalid selected toolchain; use cpuv toolchain use to select a compiler")?;
+        return locate(&selected.compiler).context(
+            "Selected toolchain is unavailable; use cpuv toolchain use to select another compiler",
+        );
+    }
     if let Ok(path) = locate(Path::new("g++")) {
         return Ok(path);
     }
     msys::discover()
+}
+
+pub fn selection_file() -> Result<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".cache")))
+        .context("Cannot locate per-user toolchain storage")?;
+    Ok(base.join("cpuv/toolchains/selected.json"))
+}
+
+pub fn msys2_roots() -> Vec<PathBuf> {
+    let mut seen = std::collections::BTreeSet::new();
+    msys::roots()
+        .into_iter()
+        .filter_map(|root| root.canonicalize().ok().map(driver_path))
+        .filter(|root| root.join("usr/bin/pacman.exe").is_file())
+        .filter(|root| seen.insert(root.to_string_lossy().replace('/', "\\").to_lowercase()))
+        .collect()
+}
+
+pub fn installed() -> Result<Vec<Toolchain>> {
+    let mut paths = msys::candidates()?;
+    if let Some(value) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&value) {
+            let compiler = directory.join("g++.exe");
+            if compiler.is_file() && !is_project_shim(&compiler) {
+                paths.insert(driver_path(compiler.canonicalize()?));
+            }
+        }
+    }
+    if let Ok(selected) = discover(None) {
+        paths.insert(selected);
+    }
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| probe(Some(&path)).ok())
+        .collect())
 }
 fn field(text: &str, prefix: &str) -> Option<String> {
     text.lines()
@@ -202,8 +263,8 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
         if is_msys2 && arch == "x86_64" && threads == "posix" && exceptions == "seh" && dual == "1"
         {
             match crt {
-                "ucrt" => Some(Provider::msys2("ucrt64", "mingw-w64-ucrt-x86_64-")),
-                // Managed binaries intentionally start with one validated ecosystem.
+                "ucrt" => Some(Provider::msys2("ucrt64")?),
+                "msvcrt" => Some(Provider::msys2("mingw64")?),
                 _ => None,
             }
         } else {

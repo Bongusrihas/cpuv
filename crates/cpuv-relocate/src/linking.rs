@@ -137,8 +137,9 @@ fn requirement_modules(module: &Module, modules: &BTreeMap<String, Module>) -> R
 }
 
 fn relative(env: &Path, value: &str) -> Result<String> {
-    let value = value
-        .strip_prefix("/ucrt64/")
+    let value = ["/ucrt64/", "/mingw64/"]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix))
         .map_or_else(|| PathBuf::from(value), |tail| env.join(tail));
     let resolved = value
         .canonicalize()
@@ -165,6 +166,24 @@ pub fn apply(
     roots: &[String],
     selection: &Selection,
 ) -> Result<()> {
+    apply_for(
+        env,
+        metadata,
+        packages,
+        roots,
+        selection,
+        cpuv_solver::PREFIX,
+    )
+}
+
+pub fn apply_for(
+    env: &Path,
+    metadata: &mut Environment,
+    packages: &[PackageFiles],
+    roots: &[String],
+    selection: &Selection,
+    namespace: &str,
+) -> Result<()> {
     let mut modules = BTreeMap::new();
     let mut owners = BTreeMap::<String, Vec<String>>::new();
     for package in packages {
@@ -184,8 +203,10 @@ pub fn apply(
     if selected.is_empty() && selection.libraries.is_empty() && selection.flags.is_empty() {
         for root in roots {
             let name = cpuv_solver::split_requirement(root).0;
-            let package_name = cpuv_solver::normalize(name);
-            let base = package_name.trim_start_matches(cpuv_solver::PREFIX);
+            let package_name = cpuv_solver::normalize_for(name, namespace);
+            let base = package_name
+                .strip_prefix(namespace)
+                .unwrap_or(&package_name);
             let exported = owners.get(&package_name).cloned().unwrap_or_default();
             if exported.iter().any(|name| name == base) {
                 unique(&mut selected, base.into());
