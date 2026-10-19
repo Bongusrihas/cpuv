@@ -24,6 +24,9 @@ struct Tool {
     #[serde(flatten)]
     source: Archive,
     executable: String,
+    // Provider declarations are not part of the downloaded artifact's identity.
+    #[serde(default, skip_serializing)]
+    conan_package: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct Registry {
@@ -304,7 +307,13 @@ fn run(command: &mut Command, log: &Path) -> Result<()> {
     Ok(())
 }
 
-fn configure_profile(tc: &Toolchain, profile: &Profile, key: &str, jobs: usize) -> Result<String> {
+fn configure_profile(
+    tc: &Toolchain,
+    profile: &Profile,
+    key: &str,
+    jobs: usize,
+    platform_tools: &[String],
+) -> Result<String> {
     let arch = match tc.abi.arch.as_str() {
         "x86_64" => "x86_64",
         "x86" => "x86",
@@ -376,7 +385,79 @@ fn configure_profile(tc: &Toolchain, profile: &Profile, key: &str, jobs: usize) 
         );
         output.push_str(&format!("{name}={encoded}\n"));
     }
+    append_platform_tools(&mut output, platform_tools)?;
     Ok(output)
+}
+
+fn append_platform_tools(output: &mut String, tools: &[String]) -> Result<()> {
+    if !tools.is_empty() {
+        output.push_str("[platform_tool_requires]\n");
+        for tool in tools {
+            reference_name(tool)?;
+            output.push_str(tool);
+            output.push('\n');
+        }
+    }
+    Ok(())
+}
+
+fn build_architecture() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("x86_64"),
+        "x86" => Ok("x86"),
+        "aarch64" => Ok("armv8"),
+        value => bail!("Unsupported build-tool execution architecture {value}"),
+    }
+}
+
+fn native_build_compiler(cli: &Cli, base: &Toolchain) -> Result<Option<Toolchain>> {
+    let native_arch = match build_architecture()? {
+        "armv8" => "aarch64",
+        value => value,
+    };
+    let selected = if let Some(compiler) = &cli.build_compiler {
+        let tc = cpuv_toolchain::probe(Some(compiler))?;
+        ensure!(
+            tc.abi.arch == native_arch,
+            "--build-compiler must produce {native_arch} executables for this cpuv host, not {}",
+            tc.abi.arch
+        );
+        Some(tc)
+    } else if base.abi.arch == native_arch {
+        Some(base.clone())
+    } else {
+        cpuv_toolchain::installed()?
+            .into_iter()
+            .find(|tc| tc.abi.arch == native_arch && tc.abi.crt_runtime != "cygwin")
+    };
+    if let Some(tc) = &selected {
+        cpuv_toolchain::doctor(tc, &[])?;
+    }
+    Ok(selected)
+}
+
+fn configure_build_profile(
+    native: Option<&Toolchain>,
+    jobs: usize,
+    tools: &[String],
+) -> Result<String> {
+    if let Some(tc) = native {
+        let key = blake3::hash(&serde_json::to_vec(&(
+            tc,
+            archive::digest(&tc.compiler_path)?,
+            tools,
+        ))?)
+        .to_hex()
+        .to_string();
+        configure_profile(tc, &Profile::default(), &key, jobs, tools)
+    } else {
+        let mut output = format!(
+            "[settings]\nos=Windows\narch={}\nbuild_type=Release\n[conf]\ntools.build:jobs={jobs}\n",
+            build_architecture()?
+        );
+        append_platform_tools(&mut output, tools)?;
+        Ok(output)
+    }
 }
 
 fn modules_for(node: &serde_json::Value, name: &str) -> Vec<String> {
@@ -567,6 +648,7 @@ struct CatalogContext {
     tools: tools::Tools,
     path: OsString,
     profile_path: PathBuf,
+    build_profile_path: PathBuf,
     key: String,
     _guard: File,
 }
@@ -606,10 +688,11 @@ async fn prepare_context(
         "Another catalog operation is using this compiler/profile; retry when it finishes",
     )?;
     let tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
+    let native = native_build_compiler(cli, base_tc)?;
     let mut paths = vec![
-        tc.compiler_path.parent().unwrap().to_owned(),
         tools.cmake.parent().unwrap().to_owned(),
         tools.ninja.parent().unwrap().to_owned(),
+        tc.compiler_path.parent().unwrap().to_owned(),
     ];
     if let Some(host) = cpuv_relocate::msys_host_bin(tc.compiler_path.parent().unwrap()) {
         paths.push(host);
@@ -623,7 +706,20 @@ async fn prepare_context(
         .map(usize::from)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
     let profile_path = home.join("cpuv-profile");
-    fs::write(&profile_path, configure_profile(&tc, profile, &key, jobs)?)?;
+    let build_profile_path = home.join("cpuv-build-profile");
+    fs::write(
+        &profile_path,
+        configure_profile(&tc, profile, &key, jobs, &tools.platform_references)?,
+    )?;
+    fs::write(
+        &build_profile_path,
+        configure_build_profile(native.as_ref(), jobs, &tools.platform_references)?,
+    )?;
+    if native.is_none() {
+        eprintln!(
+            "No native build compiler found; verified platform tools remain available. Tool recipes requiring compilation need --build-compiler or CPUV_BUILD_CXX."
+        );
+    }
     Ok(CatalogContext {
         tc,
         base,
@@ -631,6 +727,7 @@ async fn prepare_context(
         tools,
         path,
         profile_path,
+        build_profile_path,
         key,
         _guard: guard,
     })
@@ -671,6 +768,28 @@ pub async fn execute(root: &Path, cli: &Cli, arguments: &[OsString]) -> Result<i
     } else {
         upstream.args(arguments);
     }
+    let action = arguments
+        .first()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let subcommand = arguments
+        .get(1)
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let uses_profiles = ["install", "create", "build", "test", "export-pkg"]
+        .contains(&action.as_ref())
+        || (action == "graph" && ["info", "explain", "build-order"].contains(&subcommand.as_ref()))
+        || (action == "profile" && subcommand == "show");
+    let explicit_build_profile = arguments.iter().any(|value| {
+        let value = value.to_string_lossy();
+        value == "-pr:b"
+            || value == "--profile:build"
+            || value.starts_with("-pr:b=")
+            || value.starts_with("--profile:build=")
+    });
+    if uses_profiles && !explicit_build_profile {
+        upstream.arg("-pr:b").arg(&context.build_profile_path);
+    }
     if cli.offline {
         let action = arguments
             .first()
@@ -688,9 +807,10 @@ pub async fn execute(root: &Path, cli: &Cli, arguments: &[OsString]) -> Result<i
         }
     }
     eprintln!(
-        "Conan home: {}\nDefault profile: {}",
+        "Conan home: {}\nDefault target profile: {}\nBuild-tool profile: {}",
         context.home.display(),
-        context.profile_path.display()
+        context.profile_path.display(),
+        context.build_profile_path.display()
     );
     Ok(upstream
         .status()
@@ -746,6 +866,7 @@ pub async fn sync(
         tools,
         path,
         profile_path,
+        build_profile_path,
         key,
         _guard,
     } = prepare_context(cli, base_tc, &profile, &manifest.project.std).await?;
@@ -782,7 +903,7 @@ pub async fn sync(
         .args(["install", "-pr:h"])
         .arg(&profile_path)
         .arg("-pr:b")
-        .arg(&profile_path)
+        .arg(&build_profile_path)
         .arg(if cli.from_source {
             "--build=*"
         } else {

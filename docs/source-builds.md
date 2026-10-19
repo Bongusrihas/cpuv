@@ -28,6 +28,8 @@ Compatible packages are reused; missing binaries build with the selected native 
 
 Choose the compiler with --compiler, CPUV_CXX, CXX, or PATH. GCC selects its own linker. Catalog projects start with project.std = "default". The observed C++ mode, architecture, compiler version, libstdc++ ABI, executable identity, and flags define the profile. Unsupported upstream language requirements fail explicitly.
 
+Conan's host profile describes the libraries and programs being compiled. Its separate build profile describes tools that run on the cpuv machine. For example, a 32-bit GCC target on x64 Windows keeps arch=x86 for libraries and arch=x86_64 for build tools. cpuv discovers a native GCC independently, or accepts --build-compiler PATH / CPUV_BUILD_CXX. Target ABI flags are not copied into build-tool compilation. Without a native build compiler, verified platform tools remain usable; building additional native tools from source requires a suitable build compiler.
+
 CPPFLAGS applies to C and C++; CFLAGS applies to C; CXXFLAGS applies to C++; LDFLAGS applies to linking. Windows quoting rules apply. Flags are saved and passed to dependency builds and application compilation:
 
 ```powershell
@@ -42,6 +44,8 @@ Unset variables retain locked values. Remove the profile variables and run cpuv 
 
 build-tools.toml pins official standalone Conan, CMake, and Ninja archives with SHA-256 verification. No system Python, Rust, Git, CMake, or Ninja is required for bootstrap. Particular upstream builds may need other tools. Automatic bootstrap targets x64 Windows.
 
+The manifest also declares provider package identities for supplied tools. cpuv checks each declared executable's actual version, places the supplied tools first on the provider PATH, and advertises those exact versions in both profiles' [platform_tool_requires] sections. Conan substitutes a platform tool only when its version satisfies the recipe requirement; other versions still resolve through the upstream provider using the native build profile. cpuv does not rewrite library recipes or claim a newer tool version than it supplies. See [Conan profiles](https://docs.conan.io/2/reference/config_files/profiles.html).
+
 --concurrent-downloads configures cpuv concurrency and Conan parallel binary transfers. --build-jobs controls supported parallel build helpers. Actual parallelism depends on the graph and upstream metadata.
 
 cpuv byte, extraction, and timeout limits cover MSYS2 and bootstrap archives only. Conan owns its package/source downloads and extraction; cpuv does not wrap arbitrary recipe network calls. The separate 64 MiB index cap does not limit package archives.
@@ -51,6 +55,8 @@ cpuv byte, extraction, and timeout limits cover MSYS2 and bootstrap archives onl
 Version-3 cpuv.lock embeds upstream revision references, resolved package versions, observations, and portable flags. Local executable/cache paths stay in .cpuv and the shared cache. Commit cpuv.toml and cpuv.lock; exclude .cpuv. Legacy source manifests and version-2 locks migrate during successful synchronization, resolving catalog metadata anew.
 
 Profile identities separate Conan homes and participate in package IDs. Upstream header-only/tool recipes may intentionally reduce identities. cpuv checks Conan cache manifests before and after installation, deploys host packages privately, relocates generated paths, collects DLLs with collision checks, and inspects binaries before committing. Failure preserves the active environment and configuration; failed restoration preserves recovery backups.
+
+Archive inspection uses file signatures rather than treating every .a/.lib suffix as a binary. Text documents outside library directories are preserved and listed in compatibility.json under non_archive_files_skipped. Invalid archive files in library directories still fail validation, and genuine nested archives retain COFF architecture checks.
 
 Packages and their upstream-packaged licenses stay in .cpuv/env/full_deploy. Application outputs stay in .cpuv/build. Logs stay in the cache's catalog/logs directory. link-plan.json records public modules; ambiguous interfaces require explicit [link] configuration.
 

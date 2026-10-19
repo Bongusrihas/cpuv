@@ -49,7 +49,9 @@ cpuv --catalog add fmt
 cpuv run g++ program.cpp
 ```
 
-Standalone Conan embeds Python; CMake/Ninja are bootstrapped too. Prebuilt cpuv users need no system Rust or Python. cpuv conan delegates arguments in the managed compiler/profile home. Its default host/build profile records the selected GCC and flags; upstream profile arguments can override it. Export/create/add/remote commands must use the same project and compiler/profile. A changed profile can select a different home needing its own remote/recipe setup. The command prints that home/profile.
+Standalone Conan embeds Python; CMake/Ninja are bootstrapped too. Prebuilt cpuv users need no system Rust or Python. cpuv conan delegates arguments in the managed compiler/profile home. The default host profile records the selected target GCC and flags; a separate build profile selects native build tools. A 32-bit target does not request 32-bit CMake on x64 Windows. --build-compiler PATH or CPUV_BUILD_CXX selects the native GCC when needed. Explicit upstream build-profile arguments override the generated build profile. Export/create/add/remote commands must use the same project and compiler/profile. A changed target profile can select a different home needing its own remote/recipe setup. The command prints that home and both profiles.
+
+Verified bootstrap tool versions are declared as Conan platform tool requirements. Upstream requirements still decide whether a supplied version is acceptable. Missing package binaries followed by Build are normal source-build planning; an Invalid build requirement is a separate error and must be addressed before compilation. This separation does not make an old GCC support language features it lacks.
 
 Use an actual trusted registry URL in place of this placeholder:
 

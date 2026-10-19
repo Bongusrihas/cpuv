@@ -41,6 +41,8 @@ cpuv supplies the planned include directories, library directories, definitions,
 
 Catalog mode bootstraps standalone Conan, CMake, and Ninja into the cache. It requires no system Python or Rust. ConanCenter maintains package build instructions; cpuv contains no per-library recipes. Some upstream builds need additional system tools. Cygwin and cross-OS catalog builds are not supported by this adapter. See [catalog installation](source-builds.md).
 
+Library targets and build tools use separate Conan profiles. A 32-bit native GCC target on x64 Windows retains its own ABI while build tools run as native x64 executables. Supplied bootstrap versions satisfy only matching upstream tool requirements. Additional tools needing native compilation require a matching native build compiler, selected automatically or with --build-compiler/CPUV_BUILD_CXX. This corrects tool architecture selection; upstream library support for an older GCC remains a separate requirement.
+
 Open-source licensing gives users the right to inspect, modify, build, and redistribute cpuv under Apache-2.0. It does not imply universal binary compatibility. The repository contains all first-party implementation code; third-party dependencies retain their own licenses.
 
 See [Windows providers and toolchains](windows-providers.md) for compiler installation/selection, separate CRT policies, custom remotes, and full Conan recipe references.

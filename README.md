@@ -236,6 +236,7 @@ cpuv doctor compiles, links, and runs a small program using the actual driver. U
 | Setting | Purpose |
 | --- | --- |
 | --compiler PATH | Select the compiler for toolchain discovery and environment creation |
+| --build-compiler PATH, CPUV_BUILD_CXX | Select native GCC for Conan build tools independently of the target compiler |
 | CPUV_CXX, then CXX | Compiler selection before cpuv selection/PATH; specify an executable, without shell flags |
 | CPUV_MSYS2_ROOT / MSYS2_ROOT | Help discover an unregistered MSYS2 installation when g++ is absent from PATH |
 | -C DIRECTORY | Work in another project directory |

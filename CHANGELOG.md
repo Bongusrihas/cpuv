@@ -2,6 +2,9 @@
 
 ## 0.0.3 — 2026-10-19
 
+- Classify archive candidates by their file signature, preserving text licenses with .LIB extensions while retaining malformed-library and architecture checks.
+- Separate Conan target and native build-tool profiles, including 32-bit GCC targets on x64 Windows; allow --build-compiler/CPUV_BUILD_CXX to select the native build compiler.
+- Declare checksum-verified bootstrap tools through Conan platform tool requirements using their verified versions, avoiding unnecessary or unsupported provider tool binaries.
 - Add MSYS2 MINGW64 binary selection for observed compatible MSVCRT GCC profiles, separate from UCRT64.
 - Add toolchain list/install/use/reset commands, pacman-capable host discovery, dry-run/offline installation, and verified compiler selection without PATH edits.
 - Expose standalone Conan commands using the same managed compiler/profile home as add/sync, including remotes and recipe export/create.

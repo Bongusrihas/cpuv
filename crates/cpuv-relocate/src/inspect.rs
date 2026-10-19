@@ -42,6 +42,7 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
     let mut archives = 0;
     let mut objects = 0;
     let mut unknown_archive_members = 0;
+    let mut non_archive_files = Vec::new();
     let mut external = BTreeSet::new();
     for entry in walkdir::WalkDir::new(env).sort_by_file_name() {
         let entry = entry?;
@@ -96,6 +97,23 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
             });
         } else if ext == "a" || ext == "lib" {
             let data = fs::read(path)?;
+            if !data.starts_with(b"!<arch>\n") && !data.starts_with(b"!<thin>\n") {
+                let relative = path.strip_prefix(env)?;
+                let library_payload = relative.parent().is_some_and(|parent| {
+                    parent.components().any(|component| {
+                        ["lib", "lib32", "lib64", "libs"]
+                            .iter()
+                            .any(|name| component.as_os_str().eq_ignore_ascii_case(name))
+                    })
+                });
+                ensure!(
+                    !library_payload,
+                    "Invalid library archive {}: expected archive magic",
+                    path.display()
+                );
+                non_archive_files.push(super::portable(relative));
+                continue;
+            }
             let archive = goblin::archive::Archive::parse(&data)
                 .with_context(|| format!("Unsupported library archive {}", path.display()))?;
             archives += 1;
@@ -156,6 +174,7 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
         serde_json::json!({"compatibility_filter_only": true, "binary_compatibility_guaranteed": false,
         "target_architecture": arch, "pe_binaries": binaries, "library_archives": archives,
         "coff_members_checked": objects, "unclassified_archive_members": unknown_archive_members,
+        "non_archive_files_skipped": non_archive_files,
         "packaged_symbol_edges_checked": checked_symbols, "external_dlls_not_proven": external,
         "not_proven": ["CPU instruction requirements", "structure packing", "library feature macros", "debug iterator ABI", "RTTI/exceptions across interfaces", "external and ordinal exports", "LTO plugin compatibility"]}),
     )

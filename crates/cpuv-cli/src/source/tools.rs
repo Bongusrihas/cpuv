@@ -4,6 +4,7 @@ pub struct Tools {
     pub cmake: PathBuf,
     pub ninja: PathBuf,
     pub conan: PathBuf,
+    pub platform_references: Vec<String>,
 }
 
 async fn get(
@@ -91,9 +92,28 @@ pub async fn prepare(
         get("ninja", "1.10", registry, cache, offline, limits),
         get("conan", "2.33", registry, cache, offline, limits)
     )?;
+    let mut platform_references = Vec::new();
+    for (name, executable) in [("cmake", &cmake), ("ninja", &ninja), ("conan", &conan)] {
+        let spec = &registry.tools[name];
+        if let Some(package) = &spec.conan_package {
+            let reference = format!("{package}/{}", spec.version);
+            reference_name(&reference)?;
+            let output = Command::new(executable).arg("--version").output()?;
+            ensure!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .split_whitespace()
+                        .any(|token| token == spec.version),
+                "Bootstrapped {name} did not report the declared version {}",
+                spec.version
+            );
+            platform_references.push(reference);
+        }
+    }
     Ok(Tools {
         cmake,
         ninja,
         conan,
+        platform_references,
     })
 }

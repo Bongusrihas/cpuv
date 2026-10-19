@@ -65,6 +65,9 @@ struct Cli {
     refresh: bool,
     #[arg(long, global = true)]
     compiler: Option<PathBuf>,
+    /// Native GCC used for compiling build tools, independently of the target GCC.
+    #[arg(long, global = true, env = "CPUV_BUILD_CXX")]
+    build_compiler: Option<PathBuf>,
     /// Build catalog packages from source with the selected GCC.
     #[arg(long, global = true, env = "CPUV_FROM_SOURCE")]
     from_source: bool,
