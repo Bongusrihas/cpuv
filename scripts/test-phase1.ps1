@@ -51,7 +51,8 @@ try {
     Write-Output "Phase 1 gate: $status. Evidence: $EvidenceDirectory"
 } finally {
     $revision = (& git rev-parse HEAD).Trim()
-    $files = & rg --files crates scripts .github .cargo Cargo.toml Cargo.lock build-tools.toml
+    $files = Get-ChildItem -LiteralPath @('crates','scripts','.github','.cargo','Cargo.toml','Cargo.lock','build-tools.toml') -Recurse -File |
+        ForEach-Object { Resolve-Path -LiteralPath $_.FullName -Relative }
     $hashes = @($files | Sort-Object | ForEach-Object { [ordered]@{ path=$_; sha256=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() } })
     $binaryHash = if ($binary -and (Test-Path -LiteralPath $binary)) { (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
     [ordered]@{ schema=1; phase=1; result=$status; profile=$buildProfile; rustc=((& rustc -vV) -join "`n"); utc=[DateTime]::UtcNow.ToString('o'); source_revision=$revision; compiler=$Compiler; binary=$binary; binary_sha256=$binaryHash; source_files=$hashes } |
