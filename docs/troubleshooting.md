@@ -78,6 +78,8 @@ Use the exact name published by the selected provider. cpuv refreshes a cached n
 
 An error saying a Conan requirement could not be resolved happens before compilation. Check the catalog, version constraint, configured remotes, network access, and the log. It does not establish an ABI or linker incompatibility, and cpuv cannot infer build instructions for a package absent from the selected catalog. See [provider selection](source-builds.md#provider-selection).
 
+CI runs a missing-recipe regression against a synthetic package name, verifies unchanged project/lock/environment receipts, and rechecks a native consumer after rejection. This protects failure handling; it does not add missing recipes to an upstream catalog. To use an unpublished C++ library, provide an upstream/local Conan recipe through `cpuv conan export` and add its full reference, or build/install through the library's documented process. Python wheels and R packages are not interchangeable C++ catalog entries.
+
 ## Find the relevant diagnostics
 
 | Diagnostic | What it explains |

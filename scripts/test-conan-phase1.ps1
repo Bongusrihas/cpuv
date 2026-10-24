@@ -3,6 +3,7 @@ param(
     [string]$Binary = (Join-Path $PSScriptRoot '..\target\debug\cpuv.exe')
 )
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
 $Compiler = (Resolve-Path -LiteralPath $Compiler).Path
 $Binary = (Resolve-Path -LiteralPath $Binary).Path
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('cpuv Conan phase1 ' + [guid]::NewGuid().ToString('N'))
@@ -50,6 +51,27 @@ Reject-Cpuv --offline sync
 Invoke-Cpuv lock
 Invoke-Cpuv verify
 Invoke-Cpuv run $driver main.cpp
+# Missing upstream recipes must fail before compilation and preserve a usable environment.
+# A synthetic name avoids making the test depend on one real library remaining unpublished.
+$missingPackage = 'cpuv-missing-fixture-' + [guid]::NewGuid().ToString('N')
+$preservedFiles = @($manifestPath, $lockPath, (Join-Path $envDir 'manifest.json'))
+$beforeMissing = @($preservedFiles | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash })
+$previousErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $missingOutput = & $Binary --project $fixture add $missingPackage 2>&1
+    $missingExit = $LASTEXITCODE
+} finally { $ErrorActionPreference = $previousErrorAction }
+$missingOutput | Write-Output
+if ($missingExit -eq 0) { throw 'Missing catalog recipe was unexpectedly installed' }
+$missingText = $missingOutput -join "`n"
+if (-not $missingText.Contains($missingPackage) -or -not $missingText.Contains('Conan could not resolve this package name/version')) {
+    throw 'Missing catalog recipe did not report the resolution-stage failure'
+}
+$afterMissing = @($preservedFiles | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash })
+if (Compare-Object $beforeMissing $afterMissing) { throw 'Rejected missing recipe changed the manifest, lock or environment receipt' }
+Invoke-Cpuv verify
+Invoke-Cpuv run $driver main.cpp
 $previousFlags = $env:CXXFLAGS
 $lockBefore = (Get-FileHash -LiteralPath $lockPath).Hash
 try {
@@ -60,4 +82,4 @@ if ((Get-FileHash -LiteralPath $lockPath).Hash -ne $lockBefore) { throw 'Rejecte
 Invoke-Cpuv --offline sync
 Invoke-Cpuv remove fmt
 Invoke-Cpuv verify
-Write-Output "PASS: Conan Phase 1 shared/static, frozen/profile/offline/repair contracts; fixture: $fixture"
+Write-Output "PASS: Conan Phase 1 shared/static, missing-recipe preservation, frozen/profile/offline/repair contracts; fixture: $fixture"

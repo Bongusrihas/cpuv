@@ -19,6 +19,8 @@ All first-party runtime code and retained regression tests live under crates/, w
 
 Do not commit generated environments, build outputs, caches, binaries, local reports, absolute personal paths, or credentials. Commit Cargo.lock for reproducible application builds. Preserve upstream license notices. Document ABI or provider limitations explicitly; do not bypass compatibility checks to make an incompatible package appear supported.
 
+Run the configured CI for documentation changes as well as code changes. Do not use commit-message CI-skip markers; the release workflow owns tag validation and the Windows build workflow covers branch pushes and pull requests.
+
 The Windows CI and release workflows check formatting, Clippy, compilation, and the behavioral test suite. Tests establish only the cases and toolchains actually exercised; the [compatibility policy](docs/compatibility.md) defines the supported boundary.
 
 ## Phase 1 acceptance gate
