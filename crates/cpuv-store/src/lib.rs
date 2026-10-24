@@ -74,6 +74,46 @@ pub fn link_or_copy(from: &Path, to: &Path) -> Result<bool> {
     }
 }
 
+fn publish_blob_with(
+    from: &Path,
+    to: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    publish_blob_with_ops(from, to, link, |source, output| {
+        std::io::copy(&mut File::open(source)?, output)?;
+        Ok(())
+    })
+}
+
+fn publish_blob_with_ops(
+    from: &Path,
+    to: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    copy: impl FnOnce(&Path, &mut File) -> Result<()>,
+) -> Result<()> {
+    if to.exists() {
+        return Ok(());
+    }
+    if link(from, to).is_ok() || to.exists() {
+        return Ok(());
+    }
+    let mut staged = tempfile::NamedTempFile::new_in(to.parent().context("Missing blob parent")?)?;
+    copy(from, staged.as_file_mut())?;
+    staged.as_file().sync_all()?;
+    ensure!(
+        digest_file(from)? == digest_file(staged.path())?,
+        "Blob copy verification failed"
+    );
+    if let Err(error) = staged.persist_noclobber(to) {
+        ensure!(
+            to.is_file(),
+            "Publishing cache blob failed: {}",
+            error.error
+        );
+    }
+    Ok(())
+}
+
 fn pacman_metadata(path: &Path, kind: tar::EntryType) -> bool {
     // MinGW packages may register host pacman hooks outside the toolchain prefix.
     // These are installer metadata, never project payload or executable hooks.
@@ -101,7 +141,7 @@ fn digest_file(path: &Path) -> Result<String> {
 
 impl Store {
     pub fn new(root: PathBuf) -> Result<Self> {
-        for dir in ["packages", "blobs", "locks"] {
+        for dir in ["packages", "blobs", "locks", "quarantine"] {
             fs::create_dir_all(root.join(dir))?;
         }
         Ok(Self {
@@ -118,7 +158,29 @@ impl Store {
     pub fn package_dir(&self, p: &Package) -> PathBuf {
         self.root.join("packages").join(&p.sha256)
     }
+    fn package_lock(&self, p: &Package, exclusive: bool) -> Result<File> {
+        ensure!(
+            p.sha256.len() == 64 && p.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid package cache key"
+        );
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.root.join("locks").join(format!("{}.lock", p.sha256)))?;
+        if exclusive {
+            file.lock_exclusive()?;
+        } else {
+            FileExt::lock_shared(&file)?;
+        }
+        Ok(file)
+    }
     pub fn cached(&self, p: &Package) -> Result<Option<StoredPackage>> {
+        let _guard = self.package_lock(p, false)?;
+        self.cached_unlocked(p)
+    }
+    fn cached_unlocked(&self, p: &Package) -> Result<Option<StoredPackage>> {
         let dir = self.package_dir(p);
         let path = dir.join("cpuv-pkg.json");
         if !path.exists() {
@@ -132,6 +194,7 @@ impl Store {
         );
         for f in &stored.files {
             let path = dir.join("payload").join(safe_relative(&f.path)?);
+            cpuv_core::regular(&path)?;
             ensure!(
                 fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() == f.size),
                 "Cache is incomplete for {}; remove {} and sync again",
@@ -144,7 +207,82 @@ impl Store {
                 path.display()
             );
         }
+        let expected: std::collections::BTreeSet<_> =
+            stored.files.iter().map(|f| f.path.clone()).collect();
+        ensure!(
+            expected.len() == stored.files.len(),
+            "Duplicate cached package file records"
+        );
+        let mut actual = std::collections::BTreeSet::new();
+        for entry in walkdir::WalkDir::new(dir.join("payload")) {
+            let entry = entry?;
+            ensure!(
+                !entry.file_type().is_symlink(),
+                "Symlink in cached package payload"
+            );
+            if entry.file_type().is_file() {
+                actual.insert(entry.path().strip_prefix(dir.join("payload"))?.to_owned());
+            }
+        }
+        ensure!(
+            actual == expected,
+            "Unexpected or missing cached package files"
+        );
         Ok(Some(stored))
+    }
+
+    /// Preserve damaged cache entries as evidence; the caller restores from a
+    /// checksum-verified archive, including when the archive is already cached.
+    pub fn cached_or_quarantine(&self, p: &Package) -> Result<Option<StoredPackage>> {
+        let _guard = self.package_lock(p, true)?;
+        self.cached_or_quarantine_unlocked(p)
+    }
+    fn cached_or_quarantine_unlocked(&self, p: &Package) -> Result<Option<StoredPackage>> {
+        let reason = match self.cached_unlocked(p) {
+            Ok(Some(package)) => return Ok(Some(package)),
+            Ok(None) if !self.package_dir(p).exists() => return Ok(None),
+            Ok(None) => "Missing package receipt".to_owned(),
+            Err(error) => format!("{error:#}"),
+        };
+        let directory = tempfile::Builder::new()
+            .prefix("package-")
+            .tempdir_in(self.root.join("quarantine"))?;
+        fs::write(
+            directory.path().join("reason.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({"package":p,"reason":reason}))?,
+        )?;
+        fs::rename(self.package_dir(p), directory.path().join("package")).context(
+            "Quarantining damaged package cache (close processes using its files and retry)",
+        )?;
+        let retained = directory.keep();
+        eprintln!(
+            "Quarantined damaged cache for {} at {}; restoring its locked archive",
+            p.name,
+            retained.display()
+        );
+        Ok(None)
+    }
+
+    fn publish_blob(&self, from: &Path, blob: &Path, digest: &str) -> Result<()> {
+        let directory = self.root.join("locks/blobs");
+        fs::create_dir_all(&directory)?;
+        let guard = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join(format!("{digest}.lock")))?;
+        guard.lock_exclusive()?;
+        if blob.exists() && digest_file(blob)? != digest {
+            let quarantine = tempfile::Builder::new()
+                .prefix("blob-")
+                .tempdir_in(self.root.join("quarantine"))?;
+            fs::rename(blob, quarantine.path().join(digest))?;
+            let _ = quarantine.keep();
+        }
+        publish_blob_with(from, blob, |from, to| fs::hard_link(from, to))?;
+        ensure!(digest_file(blob)? == digest, "Corrupted CAS blob {digest}");
+        Ok(())
     }
 
     pub fn ingest(&self, p: &Package, archive: &Path) -> Result<StoredPackage> {
@@ -157,14 +295,8 @@ impl Store {
         } else {
             bail!("Unsupported package namespace: {}", p.name)
         };
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.root.join("locks").join(format!("{}.lock", p.sha256)))?;
-        lock.lock_exclusive()?;
-        if let Some(cached) = self.cached(p)? {
+        let _guard = self.package_lock(p, true)?;
+        if let Some(cached) = self.cached_or_quarantine_unlocked(p)? {
             return Ok(cached);
         }
         let staging = tempfile::Builder::new()
@@ -280,16 +412,7 @@ impl Store {
             let size = entry.metadata()?.len();
             let blob = self.root.join("blobs").join(&digest[..2]).join(&digest);
             fs::create_dir_all(blob.parent().unwrap())?;
-            if !blob.exists() {
-                match fs::hard_link(path, &blob) {
-                    Ok(()) => (),
-                    Err(e) if blob.exists() => {
-                        let _ = e;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            ensure!(digest_file(&blob)? == digest, "Corrupted CAS blob {digest}");
+            self.publish_blob(path, &blob, &digest)?;
             fs::remove_file(path)?;
             link_or_copy(&blob, path)?;
             files.push(StoredFile {
@@ -319,6 +442,7 @@ impl Store {
         let mut stats = LinkStats::default();
         let mut owners = std::collections::BTreeMap::<PathBuf, String>::new();
         for package in packages {
+            let _guard = self.package_lock(&package.package, false)?;
             let payload = self.package_dir(&package.package).join("payload");
             for file in &package.files {
                 let relative = safe_relative(&file.path)?;
@@ -339,8 +463,81 @@ impl Store {
                 } else {
                     stats.copies += 1;
                 }
+                ensure!(
+                    digest_file(&env.join(&relative))? == file.blake3,
+                    "Package changed during materialization: {}",
+                    relative.display()
+                );
             }
         }
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn initial_blob_publication_works_without_hardlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let blob = root.path().join("blob");
+        fs::write(&source, b"verified payload").unwrap();
+        publish_blob_with(&source, &blob, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        })
+        .unwrap();
+        assert_eq!(fs::read(&source).unwrap(), fs::read(&blob).unwrap());
+        fs::write(&source, b"changed source").unwrap();
+        assert_eq!(fs::read(&blob).unwrap(), b"verified payload");
+    }
+    #[test]
+    fn failed_copy_does_not_publish_a_partial_blob() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let blob = root.path().join("blob");
+        fs::write(&source, "complete payload").unwrap();
+        let result = publish_blob_with_ops(
+            &source,
+            &blob,
+            |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            |_, output| {
+                output.write_all(b"partial")?;
+                bail!("injected disk-full failure")
+            },
+        );
+        assert!(result.is_err());
+        assert!(!blob.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_blob_publication_keeps_verified_content() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path().join("cache")).unwrap();
+        let source = root.path().join("source");
+        fs::write(&source, "shared verified content").unwrap();
+        let digest = digest_file(&source).unwrap();
+        let blob = store.root.join("blobs").join(&digest[..2]).join(&digest);
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| store.publish_blob(&source, &blob, &digest)))
+                .collect();
+            for task in tasks {
+                task.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(digest_file(&blob).unwrap(), digest);
+        fs::write(&blob, "damaged").unwrap();
+        // The source may share an inode with the blob after initial publication.
+        fs::remove_file(&source).unwrap();
+        fs::write(&source, "shared verified content").unwrap();
+        store.publish_blob(&source, &blob, &digest).unwrap();
+        assert_eq!(digest_file(&blob).unwrap(), digest);
+        assert_eq!(
+            fs::read_dir(store.root.join("quarantine")).unwrap().count(),
+            1
+        );
     }
 }

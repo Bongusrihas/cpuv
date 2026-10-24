@@ -24,7 +24,40 @@ jobs:
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
-          cargo clippy --workspace --locked -- -D warnings
+          cargo clippy --workspace --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Behavioral tests failed' }
           cargo build --workspace --locked
           if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+      - name: MSVC native integration
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $compiler = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe' | Select-Object -First 1
+          if (-not $compiler) { throw 'MSVC test compiler is missing' }
+          ./scripts/test-windows.ps1 -Compiler $compiler -CMake
+          if ($LASTEXITCODE -ne 0) { throw 'Native integration failed' }
+      - uses: msys2/setup-msys2@v2
+        id: phase1-msys2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+      - name: Complete Phase 1 acceptance gate
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.phase1-msys2.outputs.msys2-location }}
+        run: |
+          $compiler = Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/g++.exe'
+          ./scripts/test-phase1.ps1 -Compiler $compiler -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-phase1-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Phase 1 acceptance gate failed' }
+      - name: Retain Phase 1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-evidence
+          path: ${{ runner.temp }}/cpuv-phase1-evidence
+          retention-days: 14

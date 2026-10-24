@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
+pub mod bundle;
 use cpuv_relocate::{Environment, compiler_args};
 use std::{
     collections::BTreeSet,
@@ -26,7 +27,7 @@ fn environment() -> Result<PathBuf> {
 }
 
 fn output_path(args: &[OsString]) -> Option<PathBuf> {
-    if args.is_empty()
+    if cpuv_relocate::is_compiler_query(args)
         || args.iter().any(|s| {
             let s = s.to_string_lossy();
             matches!(
@@ -40,7 +41,6 @@ fn output_path(args: &[OsString]) -> Option<PathBuf> {
                     | "--help"
                     | "-###"
             ) || s.starts_with("-print-")
-                || s.starts_with("-dump")
                 || s == "-v" && args.len() == 1
         })
     {
@@ -57,6 +57,48 @@ fn output_path(args: &[OsString]) -> Option<PathBuf> {
         }
     }
     Some("a.exe".into())
+}
+
+fn msvc_output(args: &[OsString]) -> Option<PathBuf> {
+    if args.iter().any(|s| {
+        ["/c", "-c", "/e", "/ep", "/p", "/zs", "/?"]
+            .contains(&s.to_string_lossy().to_ascii_lowercase().as_str())
+    }) {
+        return None;
+    }
+    let mut result = None;
+    for (i, arg) in args.iter().enumerate() {
+        let text = arg.to_string_lossy();
+        if text.to_ascii_lowercase().starts_with("/out:") {
+            return Some(PathBuf::from(&text[5..]));
+        }
+        if let Some(value) = text.strip_prefix("/Fe") {
+            result = if value.is_empty() {
+                args.get(i + 1).map(PathBuf::from)
+            } else {
+                Some(PathBuf::from(value.trim_start_matches(':')))
+            };
+        }
+    }
+    result.or_else(|| {
+        args.iter().find_map(|arg| {
+            let path = Path::new(arg);
+            path.extension().and_then(|e| e.to_str()).filter(|e| {
+                ["c", "cpp", "cxx", "cc", "obj"].contains(&e.to_ascii_lowercase().as_str())
+            })?;
+            let mut name = PathBuf::from(path.file_name()?);
+            name.set_extension(
+                if args.iter().any(|s| {
+                    ["/ld", "/ldd"].contains(&s.to_string_lossy().to_ascii_lowercase().as_str())
+                }) {
+                    "dll"
+                } else {
+                    "exe"
+                },
+            );
+            Some(name)
+        })
+    })
 }
 
 fn deploy_dlls(binary: &Path, env: &Path, compiler_bin: &Path) -> Result<()> {
@@ -123,13 +165,30 @@ fn deploy_dlls(binary: &Path, env: &Path, compiler_bin: &Path) -> Result<()> {
 
 pub fn run() -> Result<i32> {
     let env = environment()?;
+    let root = env
+        .parent()
+        .and_then(Path::parent)
+        .context("Invalid environment location")?;
+    let _environment_guard = cpuv_core::lease(root, false)?;
+    cpuv_core::verify(&env)?;
     let metadata: Environment = serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;
-    let input: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let expected: toml::Value = toml::from_str(
+        &fs::read_to_string(env.join("request.toml"))
+            .context("Legacy environment request; run cpuv lock")?,
+    )?;
+    let actual: toml::Value = toml::from_str(&fs::read_to_string(root.join("cpuv.toml"))?)?;
     ensure!(
-        !input.iter().any(|s| s.to_string_lossy().starts_with('@')),
-        "Phase A shim does not yet support response files; pass compiler arguments directly"
+        expected == actual,
+        "Project manifest changed; run cpuv lock before compiling"
     );
+    metadata.tool_identity.verify()?;
+    let input = cpuv_core::arguments::expand(
+        &std::env::args_os().skip(1).collect::<Vec<_>>(),
+        &std::env::current_dir()?,
+        metadata.driver == "msvc",
+    )?;
     let args = compiler_args(&metadata, &env, &input)?;
+    let (args, _response_file) = cpuv_core::arguments::shorten(args, metadata.driver == "msvc")?;
     if std::env::var_os("CPUV_SHIM_TRACE").is_some() {
         eprintln!("cpuv-shim: {:?} {:?}", metadata.compiler, args);
     }
@@ -137,16 +196,26 @@ pub fn run() -> Result<i32> {
     if let Some(host) = cpuv_relocate::msys_host_bin(&metadata.compiler_bin) {
         paths.push(host);
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = metadata
+        .process_environment
+        .get("PATH")
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+    {
         paths.extend(std::env::split_paths(&path));
     }
     let status = Command::new(&metadata.compiler)
+        .envs(&metadata.process_environment)
         .args(args)
         .env("PATH", std::env::join_paths(paths)?)
         .status()
-        .context("Launching the selected GCC compiler")?;
+        .context("Launching the selected compiler")?;
     if status.success()
-        && let Some(mut output) = output_path(&input)
+        && let Some(mut output) = (if metadata.driver == "msvc" {
+            msvc_output(&input)
+        } else {
+            output_path(&input)
+        })
     {
         if !output.is_file() {
             let mut with_exe = output.as_os_str().to_owned();
@@ -158,4 +227,17 @@ pub fn run() -> Result<i32> {
         deploy_dlls(&output, &env, &metadata.compiler_bin)?;
     }
     Ok(status.code().unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dump_options_still_produce_link_output() {
+        assert_eq!(
+            output_path(&["main.cpp".into(), "-dumpdir".into(), "tmp/".into()]),
+            Some("a.exe".into())
+        );
+        assert_eq!(output_path(&["-dumpmachine".into()]), None);
+    }
 }

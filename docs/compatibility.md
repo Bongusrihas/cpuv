@@ -1,48 +1,40 @@
 # Compiler, linker, and ABI compatibility
 
-Version **0.0.3** does not support every possible Windows/GCC/linker/ABI combination. Installing g++ alone does not guarantee that a precompiled dependency is compatible.
+Version **0.0.4** targets native Windows C/C++ workflows. Compiler, runtime, SDK, architecture, library options and upstream package support must agree; downloading a library does not convert its ABI.
 
 ## Application platform
 
-The prebuilt cpuv application targets Windows 10 or newer on x86-64. It does not require Rust, Cargo, Git, or a separate Visual C++ runtime installation. Building cpuv from source requires Rust and its platform build tools. Compiling C++ programs requires a separate working GCC toolchain; cpuv can install GCC through an existing MSYS2 host; it does not bundle GCC or bootstrap MSYS2.
+The prebuilt cpuv executable targets Windows 10 or newer on x86-64 and statically links its Microsoft C runtime. It needs no Rust/Cargo or separate Visual C++ runtime installation. Building cpuv requires Rust and its platform tools. Compiling applications requires a working selected compiler. MSYS2 compiler installation uses an existing pacman host; cpuv does not bootstrap MSYS2. The vcpkg adapter requires Git and Microsoft C++ Build Tools and bootstraps provider-declared tools into its cache.
 
-## Supported combinations
+## Tested lanes and boundaries
 
-| Component | Version 0.0.3 boundary |
+| Lane | Evidence and boundary |
 | --- | --- |
-| Compiler discovery | Explicit executable, CPUV_CXX/CXX, a verified cpuv selection, PATH, then discovered MSYS2 installation roots and Windows registration |
-| Native compilation | Recognized GCC distributions use their own compiler/runtime; language defaults adapt to observed capabilities |
-| Managed prebuilt dependencies | MSYS2 UCRT64/UCRT or MINGW64/MSVCRT, x86-64, POSIX threads, SEH exceptions, dual ABI 1, with matching runtime packages |
-| Source dependencies | ConanCenter packages built/reused with the selected native MinGW GCC and saved profile; package/compiler support comes from upstream metadata |
-| Linker | Selected and invoked by GCC; must support the target, object format, runtime, and driver options |
-| Other C++ ecosystems | MSVC, Clang, Nix/WSL, and other binary/cross-OS providers are outside this release |
+| UCRT64 GCC 16.2.0, x64 | Main Phase 1 acceptance lane: native static/shared consumers, ordered and cyclic archives, shim/runtime deployment, frozen/offline restore, corruption repair, crash recovery and installer contracts. |
+| MSYS2 binary packages | UCRT64/UCRT or MINGW64/MSVCRT; x64 POSIX threads, SEH and libstdc++ dual ABI 1; matching repository/runtime packages required. |
+| Conan | Compiler/profile-specific upstream recipes, generic options and verified shared/static selection. Complete cached binaries can be redeployed offline. Recipes control source compatibility and may need additional tools. |
+| MSVC 19.51 x64 | Discovery and toolset environment, native compilation/shim/response files, Conan source consumer, CMake/CTest, offline restoration and runtime bundle exercised during implementation. Broader toolset/Debug/shared coverage remains incomplete. |
+| GNU-style Clang 22.1.8, libc++/UCRT x64 | Native consumer, response files and Conan zlib consumer exercised. Upstream packages may still fail against the installed headers; no package-specific engine workarounds are applied. |
+| vcpkg with MSVC x64 | Pinned registry/tool revision, native versions/features, `x64-windows` CMake/CTest and runtime export exercised. `x64-windows-static-md` is accepted but experimental. Direct `cpuv run cl` dependency injection is unavailable; use CMake targets. Offline mode verifies an intact installation, without rebuilding a missing tree. |
+| clang-cl / additional architectures | Adapter groundwork exists; complete native acceptance remains open. Do not infer support from discovery alone. |
+| Cygwin / WSL / cross-OS binaries | Separate execution environments; outside the native Windows adapters. |
 
-When a compiler has no supported binary provider, the repository runtime does not match, or a custom profile is requested, cpuv selects Conan; its managed remotes and exported recipes can supplement ConanCenter. Every dependency must exist there and support that compiler's features. An older GCC cannot build a library requiring an unsupported language mode. No incompatible UCRT64 binary is silently substituted for an absent or unsupported catalog package.
+These checks establish specific consumers on the test host. Clean Windows image coverage, old/current compiler matrices, complete plugin/resource coverage and every library/version combination are not certified. See [0.0.4 verification](release-notes/v0.0.4.md).
 
-## Why any ABI is not possible
+## Selection, profiles and restoration
 
-C++ ABI includes object layout, symbol naming, exceptions, standard-library configuration, and other compiler/build choices. Matching a compiler name or fingerprint does not prove that every such setting matches. MSYS2 also distinguishes UCRT and MSVCRT environments; their object/static-library payloads cannot be freely mixed. See [GCC ABI policy](https://gcc.gnu.org/onlinedocs/libstdc++/manual/abi.html) and [MSYS2 environments](https://www.msys2.org/docs/environments/).
+Compiler discovery considers an explicit executable, CPUV_CXX/CXX, a saved selection, PATH and discovered installations. Project operations preserve their recorded compiler unless explicitly changed. Named profiles own separate manifests, locks and environments; later root-manifest changes are not automatically propagated to every profile. Release/Debug and runtime/options are part of the request.
 
-cpuv filters binary candidates, checks selected runtime versions, inspects PE/COFF architectures and packaged symbol edges, and rejects common incompatible build options. Source mode builds dependencies and consumers with the saved profile instead of reusing a foreign ABI. It does not convert existing binaries or prove all upstream target-specific options, external DLLs, CPU instruction requirements, or library features compatible.
+`cpuv sync` restores a compatible selected lock; a missing lock or changed request/profile is rejected. Use `cpuv lock` to resolve intentional changes. `--refresh` does not turn sync into a graph update. Changed flags must be applied with an explicit lock update; `--reset-profile` clears saved flags before applying current settings. Builds and the standalone shim reject altered environment contents; sync can restore supported complete caches. No missing offline input is silently replaced.
 
-The source profile and compiler observations form a compiled-cache identity. Changing the compiler or saved flags rebuilds dependencies. An unset profile variable retains its locked value; sync --reset-profile clears the saved profile before applying current environment values. Common conflicting consumer ABI options are rejected. This is a bounded guard, not complete recognition of every GCC option.
+## ABI and linking
 
-## How the linker is used
+C++ compatibility includes object layout, symbol naming, exceptions, standard library, CRT, SDK, configuration and feature flags. GCC-compatible archives, MSVC libraries and unrelated runtimes are not interchangeable. PE/COFF inspection, architecture/runtime guards, compiler/SDK hashes and package metadata narrow compatibility; they cannot prove every interface, CPU instruction requirement or LTO combination. See [GCC ABI policy](https://gcc.gnu.org/onlinedocs/libstdc++/manual/abi.html) and [MSYS2 environments](https://www.msys2.org/docs/environments/).
 
-cpuv supplies the planned include directories, library directories, definitions, and linker flags to the recorded g++. GCC then invokes its own linker. A driver-supported alternative can be selected with options such as -fuse-ld when that toolchain provides a compatible implementation. An arbitrary linker executable, including Microsoft link.exe, is not interchangeable with a GCC toolchain merely because it is on PATH. See [GCC link options](https://gcc.gnu.org/onlinedocs/gcc/Link-Options.html).
+The selected compiler driver invokes its matching linker. Supported driver options can request compatible alternatives; an arbitrary linker on PATH is not a substitute. GNU plans preserve operand order, private static requirements and scoped flags. CMake evaluates provider imported targets for CMake projects. Ambiguous/missing interfaces require explicit configuration rather than library-name guesses.
 
-## After installing cpuv
+## Runtime, offline and trust
 
-1. Run cpuv init to discover and record the real compiler.
-2. Run cpuv toolchain to inspect its target, runtime, ABI observations, provider, and linker.
-3. Run cpuv doctor to compile, link, and execute a small native program. Additional flags after -- check the driver's actual linker setup.
-4. Run cpuv add for compatible MSYS2 binaries or ConanCenter packages. Use --from-source explicitly when desired.
-5. Run cpuv run g++ program.cpp to compile and execute with the project's package metadata and DLL paths.
+Application bundles stage available runtime imports, declared assets, licenses and provenance into a new directory. Unsupported delay imports are rejected. Explicit plugin/data assets remain necessary; this is not a complete offline development bundle. Minimal-PATH execution is tested locally; clean-machine execution is additional evidence, not implied.
 
-Catalog mode bootstraps standalone Conan, CMake, and Ninja into the cache. It requires no system Python or Rust. ConanCenter maintains package build instructions; cpuv contains no per-library recipes. Some upstream builds need additional system tools. Cygwin and cross-OS catalog builds are not supported by this adapter. See [catalog installation](source-builds.md).
-
-Library targets and build tools use separate Conan profiles. A 32-bit native GCC target on x64 Windows retains its own ABI while build tools run as native x64 executables. Supplied bootstrap versions satisfy only matching upstream tool requirements. Additional tools needing native compilation require a matching native build compiler, selected automatically or with --build-compiler/CPUV_BUILD_CXX. This corrects tool architecture selection; upstream library support for an older GCC remains a separate requirement.
-
-Open-source licensing gives users the right to inspect, modify, build, and redistribute cpuv under Apache-2.0. It does not imply universal binary compatibility. The repository contains all first-party implementation code; third-party dependencies retain their own licenses.
-
-See [Windows providers and toolchains](windows-providers.md) for compiler installation/selection, separate CRT policies, custom remotes, and full Conan recipe references.
+Conan offline flags disable provider remotes but do not sandbox arbitrary recipe subprocesses. Checksums verify content agreement; package signatures and hermetic builds are not implemented. Recipes and upstream builds execute with the user's permissions. See [security](../SECURITY.md), [catalog installation](source-builds.md), [providers](windows-providers.md) and [release instructions](releases.md).

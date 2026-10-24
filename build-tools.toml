@@ -7,7 +7,7 @@ sha256 = "d163cd3ab4959b0a53fa8988f2ddbd2e6c501658201e6a154386bad9dbe4f836"
 archive = "zip"
 strip_components = 1
 executable = "bin/cmake.exe"
-include = ["bin/cmake.exe", "share/cmake-3.31/Modules", "share/cmake-3.31/Templates", "doc/cmake"]
+include = ["bin/cmake.exe", "bin/ctest.exe", "share/cmake-3.31/Modules", "share/cmake-3.31/Templates", "doc/cmake"]
 exclude = ["doc/cmake/html"]
 
 [tools.ninja]

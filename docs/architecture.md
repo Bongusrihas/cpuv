@@ -1,18 +1,18 @@
 # cpuv technical architecture and engineering specification
 
-**Software version:** 0.0.3. **Specification revision:** 1.4, Windows toolchains and configurable Conan catalogs.
+**Software version:** 0.0.4. **Specification revision:** 1.5, verified environments and compiler/provider integration.
 
 **Author:** Bongu srihas. **Co-authors:** Gemini 4 argon and GPT-6 sol.
 
-This document describes the implemented version 0.0.3 architecture, its supported compatibility boundary, and the responsibilities of each component. All first-party runtime implementation is included in this source distribution.
+This document describes the implemented version 0.0.4 architecture, its supported compatibility boundary, and the responsibilities of each component. All first-party runtime implementation is included in this source distribution.
 
 ## 1. Supported boundary
 
 Managed MSYS2 binary environments are UCRT64/UCRT and MINGW64/MSVCRT on Windows x64 with POSIX threads, SEH, and libstdc++ dual ABI 1. Compiler discovery checks explicit selection, CPUV_CXX, CXX, a saved cpuv toolchain selection, and PATH. There is no personal installation path in the source. Other supported native MinGW GCC profiles use their own compiler/runtime through the ConanCenter adapter. Missing MSYS2 packages use the same automatic fallback.
 
-vcpkg, unregistered GitHub C++ archives, Nix/WSL, MSVC/Clang integration, Cygwin catalog builds, and cross-platform binary relocation are deferred. MSYS2 resolution uses one rolling repository snapshot. ConanCenter resolution uses its upstream dependency metadata and revision lock.
+MSVC, GNU-style Clang, named profiles, CMake and pinned vcpkg integration are implemented within the [tested compatibility boundary](compatibility.md). Unregistered source/archive declarations, Nix/WSL, Cygwin catalog builds and cross-platform binary relocation remain deferred. MSYS2 resolution uses one rolling repository snapshot. ConanCenter resolution uses its upstream dependency metadata and revision lock.
 
-The standalone cpuv executable embeds its Rust code and statically links its Microsoft C runtime. Users need no Rust, Cargo, Git, or PowerShell to use native setup. They still need GCC to compile C++ programs; cpuv can install GCC through an existing MSYS2 pacman host but does not bundle GCC or bootstrap MSYS2.
+The standalone cpuv executable embeds its Rust code and statically links its Microsoft C runtime. Users need no Rust, Cargo, Git, or PowerShell to use native setup. They still need a compatible compiler to compile C++ programs; cpuv can install GCC through an existing MSYS2 pacman host but does not bundle GCC or bootstrap MSYS2.
 
 ## 2. Dependency and linking authority
 
@@ -29,7 +29,7 @@ libraries = ["ws2_32"]
 flags = ["-pthread"]
 ~~~
 
-Explicit selection replaces automatic defaults. The generated link-plan.json records modules, libraries, and source authority. The bounded pkg-config reader supports variable expansion, quoted tokens, continuation lines, public Requires constraints, and selected public flags. It rejects unresolved variables, missing modules, and managed paths outside the environment. It does not evaluate arbitrary CMake targets or enable static/private interfaces. Unsupported metadata requires explicit configuration rather than guessing.
+Explicit selection replaces automatic defaults. The generated link-plan.json records modules, libraries, and source authority. The bounded pkg-config reader supports variable expansion, quoted tokens, continuation lines, Requires constraints, ordered public flags and private static requirements. It rejects unresolved variables, missing modules, and managed paths outside the environment. CMake projects use provider-generated imported targets evaluated by CMake itself. Unsupported metadata requires explicit configuration rather than guessing.
 
 ## 3. ABI is a filter, with additional evidence
 
@@ -59,9 +59,9 @@ Downloads are bounded by a configurable concurrency limit, default 50, and verif
 
 Paths, unsafe links, device names, collisions, and cross-prefix payload are validated. Known host pacman metadata under usr/share/libalpm/hooks and scripts is counted against extraction limits and discarded; project installation never executes these hooks. An explicitly requested base-devel host transaction uses pacman in the selected MSYS2 installation and has pacman's normal script behavior. Host state is separate from project ABI payload and cannot be rolled back with a project environment swap.
 
-Relocated metadata is privately copied before editing shared content. Project/package locks coordinate operations. A staged environment is committed with rollback on normal errors; this is not a crash-proof transaction against all filesystem or power failures. Cached hardlinked files must be treated as immutable.
+Relocated metadata is privately copied before editing shared content. Common reader/writer leases protect process lifetimes. Durable journals stage environment, manifest, lock and generated command updates, retaining backups on recovery failure; 32 process-exit scenarios exercise recovery boundaries. Complete content inventories and compiler/SDK fingerprints are verified before use. Corrupt cache records/blobs are quarantined and verified archives restored under locks. Cached hardlinked files must be treated as immutable. These tests do not prove survival of every hardware/filesystem failure.
 
-Checksums verify agreement with the index, not the authenticity of a compromised repository. Package signature verification and a complete software supply-chain trust policy remain outside version 0.0.3.
+Checksums verify agreement with the index, not the authenticity of a compromised repository. Package signature verification and a complete software supply-chain trust policy remain outside version 0.0.4.
 
 ### Shared community catalog pipeline
 
@@ -93,15 +93,15 @@ Package size, file count, network, disk, antivirus, and compiler startup affect 
 2. cpuv init probes the installed or selected g++, records the local toolchain, and prepares the shim. Native compiler discovery remains machine-independent.
 3. cpuv add selects compatible UCRT64 binaries or resolves catalog dependencies and builds missing binaries with the selected native compiler/profile. Both paths verify inputs, prepare the package-metadata link plan, and inspect outputs before commit.
 4. cpuv run g++ main.cpp supplies the configured include/link requirements to that GCC. GCC invokes its own assembler/linker, and cpuv runs the resulting executable with the project DLL paths.
-5. Change saved flags and run cpuv sync to rebuild source dependencies for that profile. Absent catalog entries or unsupported compiler features fail explicitly. cpuv cannot change an already compiled library's ABI by changing a hash or appending flags.
+5. Change saved flags and run cpuv lock to resolve source dependencies for that profile; sync remains frozen. Absent catalog entries or unsupported compiler features fail explicitly. cpuv cannot change an already compiled library's ABI by changing a hash or appending flags.
 
 ## 8. Source and extension boundary
 
-The source tree contains the CLI, generic catalog adapter and pinned tool bootstrap, toolchain probe, resolver, fetch pipeline, content store, relocation/linking/inspection code, compiler shim, native installer, self updater, application uninstaller, and native toolchain manager. Cargo manifests and Cargo.lock describe third-party dependencies. Build and packaging scripts are included; test suites, development fixtures, generated PDFs, and recorded benchmarks are excluded.
+The source tree contains the CLI, generic catalog adapter and pinned tool bootstrap, toolchain probe, resolver, fetch pipeline, content store, relocation/linking/inspection code, compiler shim, native installer, self updater, application uninstaller, and native toolchain manager. Cargo manifests and Cargo.lock describe third-party dependencies. Build/packaging scripts and retained behavioral/native/provider/installer fixtures are included. Generated environments, binaries, local reports and caches remain ignored.
 
 cpuv rm (also remove) edits direct project requirements and synchronizes the remaining dependency graph. cpuv uninstall operates independently of project initialization or compiler discovery: it identifies the invoked installation and recognized helpers, stages helper removal, edits eligible user PATH entries, and schedules native Windows executable deletion. Preparation failures restore staged files and attempt conditional PATH rollback. Shared tool directories, other binaries, project environments, and caches are preserved. See the [uninstall implementation update](project-encyclopedia/APPLICATION_UNINSTALL_UPDATE.md).
 
-Windows CI checks formatting, Clippy, and compilation. The release workflow creates the prebuilt assets. Adding a registry or compiler family requires an explicit metadata/layout/profile adapter and compatibility validation before activation. Complete build provenance, signature verification, and universal ABI conversion are outside this release. See the [compatibility policy](compatibility.md).
+Windows CI checks formatting, Clippy, compilation and complete Phase 1 acceptance. The release workflow repeats acceptance on optimized binaries, retains evidence and creates the prebuilt assets. Adding a registry or compiler family requires an explicit metadata/layout/profile adapter and compatibility validation before activation. Complete build provenance, signature verification, and universal ABI conversion are outside this release. See the [compatibility policy](compatibility.md).
 
 ## References
 
@@ -110,6 +110,10 @@ Windows CI checks formatting, Clippy, and compilation. The release workflow crea
 - pkg-config: https://www.freedesktop.org/wiki/Software/pkgconfig/
 - MSYS2 environments: https://www.msys2.org/docs/environments/
 
-## Windows provider extensions in 0.0.3
+## Windows provider extensions in 0.0.4
 
 Observed x86-64 POSIX/SEH GCC profiles select UCRT64 for UCRT or MINGW64 for MSVCRT, with separate namespaces and opposing-runtime import checks. Nested archive inspection covers catalog deployments. The toolchain module discovers pacman-capable hosts, delegates explicit GCC/package installation to upstream pacman, and saves verified compiler selection without editing PATH. The Conan command and synchronization paths share one context builder, compiler/profile home, and lock. Full recipe references force a whole-graph Conan resolution; upstream remotes, recipes, and revisions remain authoritative. See [Windows providers](windows-providers.md).
+
+## Version 0.0.4 integration services
+
+`cpuv-core` owns inventories, content/tool identity, response-file parsing, leases and journal recovery. CLI profile/build/maintenance modules expose named configurations, CMake/Ninja/CTest, installed-plan diagnostics and verification. Conan emits native CMake interfaces as well as pkg-config metadata and checks explicit linkage artifacts. vcpkg retains its own versioned locked graph and configurable immutable registry revision. `cpuv bundle` exports an application runtime closure with explicit assets and a receipt. These generic services consume provider metadata; they contain no named-library recipes or fix branches. See [release notes](release-notes/v0.0.4.md) for acceptance and limits.

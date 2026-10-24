@@ -29,7 +29,7 @@ pub fn environment_with_runtime_policy(
 
 pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<serde_json::Value> {
     ensure!(
-        ["ucrt", "msvcrt", "unknown"].contains(&runtime),
+        ["ucrt", "msvcrt", "msvc", "unknown"].contains(&runtime),
         "Unsupported Windows runtime {runtime}"
     );
     let expected = match arch {
@@ -79,7 +79,7 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
                     (runtime == "ucrt" && dll == "msvcrt.dll")
                         || (runtime == "msvcrt"
                             && (dll == "ucrtbase.dll" || dll.starts_with("api-ms-win-crt-")))
-                        || (runtime != "unknown"
+                        || (["ucrt", "msvcrt"].contains(&runtime)
                             && (dll.starts_with("vcruntime") || dll.starts_with("msvcp")))
                 }),
                 "Package binary imports an unsupported C/C++ runtime: {}",

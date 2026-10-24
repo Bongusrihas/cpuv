@@ -266,11 +266,12 @@ dependencies = [
 
 [[package]]
 name = "cpuv-cli"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "blake3",
  "clap",
+ "cpuv-core",
  "cpuv-fetch",
  "cpuv-relocate",
  "cpuv-shim",
@@ -285,6 +286,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shlex 1.3.0",
  "tar",
  "tempfile",
  "tokio",
@@ -292,11 +294,26 @@ dependencies = [
  "walkdir",
  "windows-sys 0.61.2",
  "zip",
+ "zstd",
+]
+
+[[package]]
+name = "cpuv-core"
+version = "0.0.4"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "fs2",
+ "serde",
+ "serde_json",
+ "shlex 1.3.0",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]
 name = "cpuv-fetch"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "cpuv-solver",
@@ -314,31 +331,37 @@ dependencies = [
 
 [[package]]
 name = "cpuv-relocate"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
+ "cpuv-core",
  "cpuv-solver",
  "goblin",
  "regex",
  "serde",
  "serde_json",
  "shlex 1.3.0",
+ "tempfile",
  "walkdir",
 ]
 
 [[package]]
 name = "cpuv-shim"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
+ "cpuv-core",
  "cpuv-relocate",
  "goblin",
  "serde_json",
+ "tempfile",
+ "toml",
+ "walkdir",
 ]
 
 [[package]]
 name = "cpuv-solver"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "regex",
@@ -347,10 +370,11 @@ dependencies = [
 
 [[package]]
 name = "cpuv-store"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "blake3",
+ "cpuv-core",
  "cpuv-solver",
  "fs2",
  "serde",
@@ -363,14 +387,16 @@ dependencies = [
 
 [[package]]
 name = "cpuv-toolchain"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "blake3",
+ "cpuv-core",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
+ "walkdir",
  "windows-sys 0.61.2",
 ]
 

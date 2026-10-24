@@ -317,6 +317,23 @@ pub fn resolve(index: &Index, roots: &[String]) -> Result<Vec<Package>> {
     resolve_for(index, roots, PREFIX)
 }
 
+/// Resolve public request identities to package owners for consumer integration.
+pub fn root_packages_for(index: &Index, roots: &[String], prefix: &str) -> Result<Vec<String>> {
+    roots
+        .iter()
+        .map(|root| {
+            let (name, op, version) = split_requirement(root);
+            Ok(provider(
+                index,
+                &format!("{}{op}{version}", normalize_for(name, prefix)),
+                prefix,
+            )?
+            .name
+            .clone())
+        })
+        .collect()
+}
+
 pub fn available(index: &Index, name: &str, prefix: &str) -> bool {
     let normalized = normalize_for(name, prefix);
     index.contains_key(&normalized)
@@ -368,9 +385,22 @@ pub fn resolve_for(index: &Index, roots: &[String], prefix: &str) -> Result<Vec<
     }
     for p in selected.values() {
         for conflict in &p.conflicts {
-            if let Ok(other) = provider(&selected, conflict, prefix) {
+            let (name, op, version) = split_requirement(conflict);
+            ensure!(
+                op.is_empty() || (!version.is_empty() && !version.contains(['<', '>', '='])),
+                "Invalid conflict constraint {conflict}"
+            );
+            for other in selected.values().filter(|other| other.name != p.name) {
+                let conflicts = (other.name == name && matches(&other.version, op, version))
+                    || other.provides.iter().any(|provided| {
+                        let (identity, _, provided_version) = split_requirement(provided);
+                        identity == name
+                            && (op.is_empty()
+                                || (!provided_version.is_empty()
+                                    && matches(provided_version, op, version)))
+                    });
                 ensure!(
-                    p.name == other.name,
+                    !conflicts,
                     "Conflicting packages: {} conflicts with {}",
                     p.name,
                     other.name
@@ -379,4 +409,53 @@ pub fn resolve_for(index: &Index, roots: &[String], prefix: &str) -> Result<Vec<
         }
     }
     Ok(ordered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn package(name: &str, provides: &[&str], conflicts: &[&str]) -> Package {
+        Package {
+            name: name.into(),
+            version: "1".into(),
+            filename: "test.pkg.tar.zst".into(),
+            sha256: "0".repeat(64),
+            size: 0,
+            depends: vec![],
+            provides: provides.iter().map(|s| s.to_string()).collect(),
+            conflicts: conflicts.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+    #[test]
+    fn ambiguous_virtual_providers_do_not_hide_conflicts() {
+        let index: Index = [
+            package("a", &["virtual"], &[]),
+            package("b", &["virtual"], &[]),
+            package("p", &[], &["virtual"]),
+        ]
+        .into_iter()
+        .map(|p| (p.name.clone(), p))
+        .collect();
+        assert!(resolve_for(&index, &["a".into(), "b".into(), "p".into()], "").is_err());
+    }
+    #[test]
+    fn versioned_conflict_only_matches_compatible_provides() {
+        let index: Index = [
+            package("a", &["virtual=2"], &[]),
+            package("p", &[], &["virtual>=3"]),
+        ]
+        .into_iter()
+        .map(|p| (p.name.clone(), p))
+        .collect();
+        assert!(resolve_for(&index, &["a".into(), "p".into()], "").is_ok());
+    }
+    #[test]
+    fn virtual_root_maps_to_selected_package_owner() {
+        let p = package("implementation", &["virtual=2"], &[]);
+        let index = Index::from([(p.name.clone(), p)]);
+        assert_eq!(
+            root_packages_for(&index, &["virtual>=2".into()], "").unwrap(),
+            ["implementation"]
+        );
+    }
 }

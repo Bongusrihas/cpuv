@@ -228,13 +228,27 @@ pub fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
 }
 
 pub fn verify(root: &Path, files: &BTreeMap<String, String>) -> Result<()> {
-    for (relative, expected) in files {
-        let path = root.join(cpuv_store::safe_relative(Path::new(relative))?);
-        ensure!(
-            fs::symlink_metadata(&path)?.is_file() && digest(&path)? == *expected,
-            "Cached source output was modified: {}",
-            path.display()
-        );
+    for relative in files.keys() {
+        cpuv_store::safe_relative(Path::new(relative))?;
     }
+    ensure!(
+        &inventory(root)? == files,
+        "Cached source/tool files changed, are missing, or contain unexpected additions: {}",
+        root.display()
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cached_tool_rejects_an_unexpected_side_loaded_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("tool.exe"), "tool").unwrap();
+        let expected = inventory(dir.path()).unwrap();
+        verify(dir.path(), &expected).unwrap();
+        fs::write(dir.path().join("unexpected.dll"), "injected").unwrap();
+        assert!(verify(dir.path(), &expected).is_err());
+    }
 }

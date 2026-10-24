@@ -1,13 +1,22 @@
 [CmdletBinding()]
 param(
-    [string]$BinaryDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) 'target\release'),
+    [string]$BinaryDirectory,
     [string]$InstallDir = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'cpuv\bin'),
     [switch]$NoPath,
     [switch]$NoCompatCopy
 )
 $ErrorActionPreference = 'Stop'
+if (-not $BinaryDirectory) {
+    $projectManifest = Join-Path (Split-Path $PSScriptRoot -Parent) 'Cargo.toml'
+    $metadataText = & cargo metadata --locked --no-deps --format-version 1 --manifest-path $projectManifest
+    if ($LASTEXITCODE -ne 0) { throw 'Could not discover Cargo target directory; pass -BinaryDirectory explicitly.' }
+    $metadata = $metadataText | ConvertFrom-Json
+    $BinaryDirectory = Join-Path $metadata.target_directory 'release'
+}
 $binary = Join-Path $BinaryDirectory 'cpuv.exe'
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing $binary. Build cpuv first." }
+$selectedVersion = & $binary --version
+if ($LASTEXITCODE -ne 0 -or $selectedVersion -notmatch '^cpuv \d+\.\d+\.\d+') { throw 'Selected executable did not identify as cpuv.' }
 $destination = [IO.Path]::GetFullPath($InstallDir)
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
 foreach ($name in @('cpuv.exe','cpuv-shim.exe')) {

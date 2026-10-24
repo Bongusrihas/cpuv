@@ -7,7 +7,103 @@ use std::{
     process::{Command, Stdio},
 };
 
+mod msvc;
 mod msys;
+
+pub fn identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
+    let mut files = std::collections::BTreeSet::from([tc.compiler_path.clone()]);
+    let mut roots = Vec::new();
+    if let Some(bin) = tc.compiler_path.parent() {
+        for entry in std::fs::read_dir(bin)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if entry.file_type()?.is_file()
+                && (tc.driver == "msvc" && (name.ends_with(".exe") || name.ends_with(".dll"))
+                    || [
+                        "clang.exe",
+                        "lld.exe",
+                        "ld.lld.exe",
+                        "llvm-ar.exe",
+                        "llvm-ranlib.exe",
+                        "libc++.dll",
+                        "libunwind.dll",
+                    ]
+                    .contains(&name.as_str()))
+            {
+                files.insert(entry.path());
+            }
+        }
+    }
+    if tc.driver == "msvc" {
+        files.insert(PathBuf::from(&tc.linker));
+        for variable in ["INCLUDE", "LIB"] {
+            if let Some(value) = tc.environment.get(variable) {
+                for directory in std::env::split_paths(&std::ffi::OsString::from(value)) {
+                    if directory.is_dir() {
+                        roots.push(directory.clone());
+                        for entry in walkdir::WalkDir::new(directory) {
+                            let entry = entry?;
+                            if entry.file_type().is_file() {
+                                files.insert(entry.path().to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return cpuv_core::ToolIdentity::capture_with_roots(files, roots);
+    }
+    for tool in ["cc1", "cc1plus", "collect2", "lto1", "as", "ld", "ar"] {
+        if let Ok(output) = compiler_command(&tc.compiler_path)?
+            .arg(format!("-print-prog-name={tool}"))
+            .output()
+            && output.status.success()
+        {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if let Ok(path) = locate(Path::new(&name)) {
+                files.insert(path);
+            }
+        }
+    }
+    for name in ["libstdc++.a", "libgcc.a", "crt2.o"] {
+        let output = compiler_command(&tc.compiler_path)?
+            .arg(format!("-print-file-name={name}"))
+            .output()?;
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if path.is_file() {
+            files.insert(driver_path(path.canonicalize()?));
+        }
+    }
+    if let Some(bin) = tc.compiler_path.parent() {
+        for entry in std::fs::read_dir(bin)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.ends_with(".dll")
+                && ["libstdc++", "libgcc", "libwinpthread"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+            {
+                files.insert(entry.path());
+            }
+        }
+    }
+    // SDK headers affect ABI even when driver and linker executables are unchanged.
+    for directory in [
+        tc.sysroot.join("include"),
+        tc.sysroot.join(&tc.abi.target_triple).join("include"),
+    ] {
+        if directory.is_dir() {
+            roots.push(directory.clone());
+            for entry in walkdir::WalkDir::new(directory) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    files.insert(entry.path().to_owned());
+                }
+            }
+        }
+    }
+    cpuv_core::ToolIdentity::capture_with_roots(files, roots)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AbiTuple {
@@ -59,6 +155,12 @@ impl Provider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toolchain {
     pub compiler_path: PathBuf,
+    #[serde(default = "gnu_driver")]
+    pub driver: String,
+    #[serde(default)]
+    pub c_compiler: PathBuf,
+    #[serde(default)]
+    pub environment: std::collections::BTreeMap<String, String>,
     pub sysroot: PathBuf,
     pub gcc_version: String,
     pub lto_compression: Vec<String>,
@@ -72,6 +174,9 @@ pub struct Toolchain {
     pub observed_abi_options: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+}
+fn gnu_driver() -> String {
+    "gnu".into()
 }
 
 /// GCC's Windows driver does not accept Rust's verbatim Win32 path prefix.
@@ -139,7 +244,12 @@ pub fn discover(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Ok(path) = locate(Path::new("g++")) {
         return Ok(path);
     }
-    msys::discover()
+    msys::discover().or_else(|_| {
+        msvc::candidates()
+            .into_iter()
+            .next()
+            .context("No native compiler found; select a compiler with --compiler")
+    })
 }
 
 pub fn selection_file() -> Result<PathBuf> {
@@ -162,11 +272,14 @@ pub fn msys2_roots() -> Vec<PathBuf> {
 
 pub fn installed() -> Result<Vec<Toolchain>> {
     let mut paths = msys::candidates()?;
+    paths.extend(msvc::candidates());
     if let Some(value) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&value) {
-            let compiler = directory.join("g++.exe");
-            if compiler.is_file() && !is_project_shim(&compiler) {
-                paths.insert(driver_path(compiler.canonicalize()?));
+            for name in ["g++.exe", "clang++.exe", "clang-cl.exe", "cl.exe"] {
+                let compiler = directory.join(name);
+                if compiler.is_file() && !is_project_shim(&compiler) {
+                    paths.insert(driver_path(compiler.canonicalize()?));
+                }
             }
         }
     }
@@ -184,13 +297,20 @@ fn field(text: &str, prefix: &str) -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 fn macro_value(text: &str, name: &str) -> Option<String> {
-    field(text, &format!("#define {name} "))
+    text.lines().find_map(|line| {
+        let rest = line
+            .trim_start()
+            .strip_prefix("#define ")?
+            .strip_prefix(name)?;
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            Some(rest.trim().to_owned())
+        } else {
+            None
+        }
+    })
 }
 pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<Toolchain> {
-    ensure!(
-        !macros.contains("#define __clang__"),
-        "This release requires GNU GCC; the selected g++ is Clang"
-    );
+    let clang = macros.contains("#define __clang__");
     ensure!(
         macro_value(macros, "__GNUC__").is_some(),
         "Selected compiler did not identify itself as GCC"
@@ -201,17 +321,21 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
         "Target {target} is not a native Windows GCC target"
     );
     let threads = field(verbose, "Thread model: ").unwrap_or_else(|| "unknown".into());
-    let version = Regex::new(r"gcc version (\d+\.\d+(?:\.\d+)?)")?
-        .captures(verbose)
-        .map(|captures| captures[1].to_owned())
-        .unwrap_or_else(|| {
-            format!(
-                "{}.{}.{}",
-                macro_value(macros, "__GNUC__").unwrap_or_default(),
-                macro_value(macros, "__GNUC_MINOR__").unwrap_or_else(|| "0".into()),
-                macro_value(macros, "__GNUC_PATCHLEVEL__").unwrap_or_else(|| "0".into())
-            )
-        });
+    let version = Regex::new(if clang {
+        r"clang version (\d+\.\d+(?:\.\d+)?)"
+    } else {
+        r"gcc version (\d+\.\d+(?:\.\d+)?)"
+    })?
+    .captures(verbose)
+    .map(|captures| captures[1].to_owned())
+    .unwrap_or_else(|| {
+        format!(
+            "{}.{}.{}",
+            macro_value(macros, "__GNUC__").unwrap_or_default(),
+            macro_value(macros, "__GNUC_MINOR__").unwrap_or_else(|| "0".into()),
+            macro_value(macros, "__GNUC_PATCHLEVEL__").unwrap_or_else(|| "0".into())
+        )
+    });
     let major = version.split('.').next().unwrap().to_owned();
     let pointer = macro_value(macros, "__SIZEOF_POINTER__");
     let arch = if macro_value(macros, "__i386__").is_some()
@@ -256,9 +380,11 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
     } else {
         "unknown"
     };
-    let stdlib_release = macro_value(macros, "_GLIBCXX_RELEASE").unwrap_or_else(|| major.clone());
+    let stdlib_release = macro_value(macros, "_LIBCPP_VERSION")
+        .or_else(|| macro_value(macros, "_GLIBCXX_RELEASE"))
+        .unwrap_or_else(|| "unknown".into());
     let dual = macro_value(macros, "_GLIBCXX_USE_CXX11_ABI").unwrap_or_else(|| "unknown".into());
-    let is_msys2 = verbose.contains("MSYS2") || verbose.contains("msys2.org");
+    let is_msys2 = !clang && (verbose.contains("MSYS2") || verbose.contains("msys2.org"));
     let provider =
         if is_msys2 && arch == "x86_64" && threads == "posix" && exceptions == "seh" && dual == "1"
         {
@@ -275,9 +401,14 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
         os: "windows".into(),
         arch,
         target_triple: target,
-        compiler_family: "gcc".into(),
+        compiler_family: if clang { "clang" } else { "gcc" }.into(),
         compiler_abi_major: major,
-        stdlib: "libstdc++".into(),
+        stdlib: if macro_value(macros, "_LIBCPP_VERSION").is_some() {
+            "libc++"
+        } else {
+            "libstdc++"
+        }
+        .into(),
         stdlib_release,
         glibcxx_cxx11_abi: dual,
         crt_runtime: crt.into(),
@@ -293,6 +424,17 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
         .context("Compiler has no installation root")?
         .to_owned();
     Ok(Toolchain {
+        driver: "gnu".into(),
+        c_compiler: compiler.with_file_name(
+            compiler
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace("clang++", "clang")
+                .replace("g++", "gcc")
+                .replace("c++", "cc"),
+        ),
+        environment: Default::default(),
         compiler_path: compiler,
         sysroot,
         gcc_version: version,
@@ -329,6 +471,9 @@ pub fn parse_verbose(verbose: &str, macros: &str, compiler: PathBuf) -> Result<T
     })
 }
 impl Toolchain {
+    pub fn compiler_id(&self) -> String {
+        format!("{}@{}", self.abi.compiler_family, self.gcc_version)
+    }
     pub fn runtime_tag(&self) -> String {
         format!(
             "{}-{}-{}",
@@ -366,20 +511,20 @@ pub fn probe_with_flags(
 ) -> Result<Toolchain> {
     ensure!(cfg!(windows), "cpuv currently supports Windows hosts");
     let path = discover(explicit)?;
+    if path
+        .file_stem()
+        .is_some_and(|s| s.eq_ignore_ascii_case("cl") || s.eq_ignore_ascii_case("clang-cl"))
+    {
+        return msvc::probe(path, flags);
+    }
     let target = compiler_command(&path)?.arg("-dumpmachine").output()?;
     ensure!(target.status.success(), "Could not query the GCC target");
     let mut command = compiler_command(&path)?;
     command.args(flags);
-    command.args([
-        "-v",
-        "-dM",
-        "-E",
-        "-x",
-        "c++",
-        "-include",
-        "bits/c++config.h",
-    ]);
-    if String::from_utf8_lossy(&target.stdout).contains("mingw") {
+    command.args(["-v", "-dM", "-E", "-x", "c++", "-include", "cstddef"]);
+    if String::from_utf8_lossy(&target.stdout).contains("mingw")
+        || String::from_utf8_lossy(&target.stdout).contains("windows-gnu")
+    {
         command.args(["-include", "_mingw.h"]);
     }
     let mut output = command
@@ -454,11 +599,17 @@ pub fn doctor(tc: &Toolchain, flags: &[std::ffi::OsString]) -> Result<serde_json
         &source,
         "#include <iostream>\nint main(){std::cout << \"cpuv-toolchain-ok\";return 0;}\n",
     )?;
-    let output = compiler_command(&tc.compiler_path)?
-        .args(flags)
-        .arg(&source)
-        .arg("-o")
-        .arg(&binary)
+    let mut compile = compiler_command(&tc.compiler_path)?;
+    compile.envs(&tc.environment).args(flags);
+    if tc.driver == "msvc" {
+        compile
+            .args(["/nologo", "/EHsc", "/MD"])
+            .arg(&source)
+            .arg(format!("/Fe{}", binary.display()));
+    } else {
+        compile.arg(&source).arg("-o").arg(&binary);
+    }
+    let output = compile
         .current_dir(temporary.path())
         .output()
         .context("Starting the compiler/linker check")?;
@@ -480,4 +631,25 @@ pub fn doctor(tc: &Toolchain, flags: &[std::ffi::OsString]) -> Result<serde_json
     Ok(
         serde_json::json!({"compiler":tc.compiler_path,"target":tc.abi.target_triple,"linker":tc.linker,"flags":flags,"compile_link_run":"passed","universal_abi_guarantee":false}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_macros_are_defined_without_matching_longer_names() {
+        assert_eq!(
+            macro_value("#define _UCRT \n", "_UCRT"),
+            Some(String::new())
+        );
+        assert_eq!(macro_value("#define _UCRT_OTHER 1\n", "_UCRT"), None);
+    }
+    #[test]
+    fn clang_uses_matching_c_driver_and_observed_libcxx_ucrt() {
+        let tc = parse_verbose("Target: x86_64-w64-windows-gnu\nThread model: posix\nclang version 22.1.8\n", "#define __GNUC__ 4\n#define __clang__ 1\n#define _UCRT\n#define __SEH__ 1\n#define _LIBCPP_VERSION 220108\n", PathBuf::from("C:/llvm/bin/clang++.exe")).unwrap();
+        assert!(tc.c_compiler.ends_with("clang.exe"));
+        assert_eq!(tc.abi.crt_runtime, "ucrt");
+        assert_eq!(tc.abi.stdlib_release, "220108");
+        assert_eq!(tc.abi.compiler_family, "clang");
+    }
 }

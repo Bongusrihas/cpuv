@@ -1,6 +1,6 @@
 # Troubleshooting cpuv
 
-This guide describes the current 0.0.3 maintenance implementation. A source push does not update downloaded executables or existing GitHub release assets.
+This guide describes the current 0.0.4 implementation. A source push does not update downloaded executables or existing GitHub release assets.
 
 ## Check the executable and compiler first
 
@@ -14,10 +14,10 @@ cpuv toolchain
 cpuv doctor
 ```
 
-The first two commands reveal competing installations or shims. Self update replaces the invoked executable; another copy can still be selected by a different terminal. Version 0.0.3 maintenance builds share a version string, so also check which release assets were installed. After the maintainer publishes replacement assets, reinstall with:
+The first two commands reveal competing installations or shims. Self update replaces the invoked executable; another copy can still be selected by a different terminal. Upgrade older releases to 0.0.4 with:
 
 ```powershell
-cpuv self update --force
+cpuv self update
 ```
 
 For a locally built update, run the rebuilt setup executable or use the packaged portable executable directly. A Git checkout alone does not change the installed application. See [installation and publishing](releases.md).
@@ -89,3 +89,9 @@ An error saying a Conan requirement could not be resolved happens before compila
 | .cpuv/env/link-plan.json | Public modules and libraries selected from package metadata |
 
 Environment reports describe the active prepared environment; a failed staged installation does not produce a new successful report. Review paths, flags, and any provider credentials before sharing logs.
+
+## A frozen request or environment verification fails
+
+Use `cpuv lock` after intentionally changing dependency declarations, linkage/options, compiler flags or configuration. `sync` restores the selected lock and rejects disagreement; `--refresh` does not update that graph. Check `cpuv plan` and `cpuv verify` for installed state.
+
+If generated metadata, payloads or DLLs were modified, run `cpuv sync` to repair from verified cached/downloaded content. Offline repair requires all needed cache inputs. Damaged MSYS2 package/blob content is retained under the shared cache's `store/quarantine`; missing offline content fails explicitly. Keep journals/backups when recovery fails, release conflicting processes and retry; do not delete recovery data to silence the error.

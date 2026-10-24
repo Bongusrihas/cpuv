@@ -95,18 +95,10 @@ pub async fn prepare(
     let mut platform_references = Vec::new();
     for (name, executable) in [("cmake", &cmake), ("ninja", &ninja), ("conan", &conan)] {
         let spec = &registry.tools[name];
+        verify_version(name, spec, executable)?;
         if let Some(package) = &spec.conan_package {
             let reference = format!("{package}/{}", spec.version);
             reference_name(&reference)?;
-            let output = Command::new(executable).arg("--version").output()?;
-            ensure!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout)
-                        .split_whitespace()
-                        .any(|token| token == spec.version),
-                "Bootstrapped {name} did not report the declared version {}",
-                spec.version
-            );
             platform_references.push(reference);
         }
     }
@@ -116,4 +108,32 @@ pub async fn prepare(
         conan,
         platform_references,
     })
+}
+
+fn verify_version(name: &str, spec: &Tool, executable: &Path) -> Result<()> {
+    let output = Command::new(executable).arg("--version").output()?;
+    ensure!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .any(|token| token == spec.version),
+        "Bootstrapped {name} did not report declared version {}",
+        spec.version
+    );
+    Ok(())
+}
+
+pub async fn build_tools(
+    registry: &Registry,
+    cache: &Path,
+    offline: bool,
+    limits: &cpuv_fetch::Limits,
+) -> Result<(PathBuf, PathBuf)> {
+    let (cmake, ninja) = tokio::try_join!(
+        get("cmake", "3.20", registry, cache, offline, limits),
+        get("ninja", "1.10", registry, cache, offline, limits)
+    )?;
+    verify_version("cmake", &registry.tools["cmake"], &cmake)?;
+    verify_version("ninja", &registry.tools["ninja"], &ninja)?;
+    Ok((cmake, ninja))
 }

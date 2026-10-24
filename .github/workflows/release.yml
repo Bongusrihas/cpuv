@@ -22,13 +22,41 @@ jobs:
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
-          cargo clippy --workspace --locked -- -D warnings
+          cargo clippy --workspace --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Behavioral tests failed' }
           ./scripts/package.ps1
-          $version = (./target/release/cpuv.exe --version).Split(' ')[1]
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
+          $releaseBinary = Join-Path $metadata.target_directory 'release/cpuv.exe'
+          $version = (& $releaseBinary --version).Split(' ')[1]
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
             throw 'Release tag must match the Cargo package version'
           }
+      - uses: msys2/setup-msys2@v2
+        id: phase1-msys2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+      - name: Complete Phase 1 acceptance gate
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.phase1-msys2.outputs.msys2-location }}
+        run: |
+          $compiler = Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/g++.exe'
+          ./scripts/test-phase1.ps1 -ReleaseBuild -Compiler $compiler -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-phase1-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Phase 1 acceptance gate failed' }
+      - name: Retain Phase 1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-evidence
+          path: ${{ runner.temp }}/cpuv-phase1-evidence
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: cpuv-windows-release

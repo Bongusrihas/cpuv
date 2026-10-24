@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.4 — 2026-10-24
+
+- Correct ordered/static metadata linking, scoped flags, pkg-config expansion and paths containing spaces.
+- Preserve compiler stdout, response-file arguments and shim runtime deployment; reject colliding outputs before compilation.
+- Add journal recovery, process-lifetime reader leases, complete environment/request/tool/SDK verification and safe cache quarantine/repair.
+- Enforce frozen sync and explicit lock updates; verify Conan shared/static artifacts and custom Cargo target installation.
+- Add profiles, MSVC/GNU-style Clang adapters, CMake/CTest, pinned vcpkg integration, plan/verify and application runtime bundles with documented limits.
+- Retain unit/native/provider/installer acceptance gates and CI release evidence. Keep library-specific recipes and fixes upstream.
+- See [0.0.4 release notes](docs/release-notes/v0.0.4.md) for validation and remaining compatibility boundaries.
+
 ## 0.0.3 — 2026-10-19
 
 - Classify archive candidates by their file signature, preserving text licenses with .LIB extensions while retaining malformed-library and architecture checks.

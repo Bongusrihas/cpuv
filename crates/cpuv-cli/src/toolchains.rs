@@ -45,7 +45,7 @@ fn select(compiler: &Path) -> Result<()> {
         tc.runtime_tag()
     );
     println!(
-        "Explicit --compiler, CPUV_CXX, and CXX still take precedence. Existing project pins require an explicit sync when changing compilers."
+        "Explicit --compiler, CPUV_CXX, and CXX take precedence for new toolchain discovery. Existing projects retain their saved compiler; use --compiler with cpuv lock or create a separate profile to change it."
     );
     Ok(())
 }

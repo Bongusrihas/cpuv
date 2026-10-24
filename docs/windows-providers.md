@@ -1,6 +1,6 @@
 # Windows providers and toolchains
 
-Version 0.0.3 supports native GNU C++ workflows with MSYS2 UCRT64, MSYS2 MINGW64, and standalone Conan. Compiler observations select the binary repository. MSYS2 dependencies and Conan recipes remain upstream metadata; cpuv has no per-library aliases, patches, or recipe table. Nix/WSL and Linux packages are outside this Windows release.
+Version 0.0.4 supports native GNU C++ workflows with MSYS2 UCRT64, MSYS2 MINGW64, and standalone Conan. Compiler observations select the binary repository. MSYS2 dependencies and Conan recipes remain upstream metadata; cpuv has no per-library aliases, patches, or recipe table. Nix/WSL and Linux packages are outside this Windows release.
 
 ## Discover and install GCC
 
@@ -70,7 +70,7 @@ cpuv conan create .\vendor\library --user myteam --channel stable --build=missin
 cpuv add 'library/1.2.3@myteam/stable'
 ```
 
-A full recipe reference can include #REVISION. It selects Conan automatically and is saved under the package name. Or declare it directly and run cpuv sync:
+A full recipe reference can include #REVISION. It selects Conan automatically and is saved under the package name. Or declare it directly and run cpuv lock:
 
 ```toml
 [dependencies]
@@ -84,3 +84,9 @@ Native search/list/profile/cache and other Conan commands are available; a bare 
 Recipes run with your permissions. Unknown packages still need a catalog entry or an explicit recipe; cpuv cannot infer build instructions from a name. See [compatibility](compatibility.md), [catalog details](source-builds.md), [troubleshooting](troubleshooting.md), and [security](../SECURITY.md).
 
 Upstream references: [MSYS2 environments](https://www.msys2.org/docs/environments/), [Conan remotes](https://docs.conan.io/2/reference/commands/remote.html), and [Conan export](https://docs.conan.io/2/reference/commands/export.html).
+
+## Additional 0.0.4 lanes
+
+MSVC and GNU-style Clang use their own compiler/runtime observations through Conan. `--profile NAME` selects an isolated named profile; `--configuration Release|Debug` selects dependency configuration. Existing projects retain their saved compiler unless explicitly changed. `cpuv lock` intentionally resolves a changed request; `cpuv sync` restores the selected compatible lock.
+
+`--provider vcpkg` selects a separate whole-graph MSVC provider with a pinned configurable registry revision, native versions/features and CMake integration. Git and Microsoft C++ Build Tools are prerequisites. Use provider imported targets through `cpuv build`/`cpuv test`; offline rebuilding of a missing vcpkg tree is not implemented. See [compatibility](compatibility.md) and [README examples](../README.md).

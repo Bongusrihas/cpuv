@@ -1,6 +1,8 @@
 # Architecture overview
 
-cpuv 0.0.3 manages Windows GCC dependencies and compilation. It discovers the real compiler, selects one package provider, prepares a hidden environment, and compiles and executes programs using package metadata.
+cpuv 0.0.4 manages native Windows C/C++ dependencies and compilation. GCC/MSYS2/Conan is the main acceptance lane; MSVC, GNU-style Clang, named configurations, CMake/CTest and pinned vcpkg integration have explicit [compatibility boundaries](docs/compatibility.md). It discovers the real compiler, selects one package provider, prepares a hidden environment, and compiles and executes programs using package metadata.
+
+The core MSYS2/Conan path is shown below; vcpkg owns a separate native CMake graph. Common content inventories, compiler/SDK identity, process-lifetime leases and journal recovery protect environment use and updates. See the [current architecture](docs/architecture.md) and [0.0.4 notes](docs/release-notes/v0.0.4.md).
 
 ```mermaid
 flowchart TD

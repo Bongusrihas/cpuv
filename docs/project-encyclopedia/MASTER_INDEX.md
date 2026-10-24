@@ -2,6 +2,8 @@
 
 An engineering knowledge base for the inspected cpuv implementation: purpose, source structure, execution, schemas, trust, operations, history, and limitations.
 
+**2026-10-24 update:** [Version 0.0.4](../release-notes/v0.0.4.md) adds verified environments, recovery/cache repair, retained acceptance gates and additional compiler/provider integrations. Use the [current architecture](../architecture.md) and [compatibility matrix](../compatibility.md); baseline chapters below remain historical inventories.
+
 **2026-10-19 update:** [Windows providers and toolchains](WINDOWS_PROVIDERS_UPDATE.md) describes version 0.0.3: MINGW64, native compiler management, namespace-aware linking, archive signature classification, separate target/native Conan profiles, verified platform tools, and direct Conan remotes/recipes. The baseline inventories below retain their original audit dates; see the [current provider guide](../windows-providers.md), [troubleshooting](../troubleshooting.md), and [maintenance release procedure](../releases.md#refresh-an-existing-release-manually) for current workflows.
 
 **2026-10-18 update:** [Application uninstall](APPLICATION_UNINSTALL_UPDATE.md) adds `cpuv uninstall` and `--dry-run`, with native executable/helper removal and conservative user PATH cleanup. The chapters, hashes, counts, and audit results below retain their dated 2026-10-17 baseline; earlier “not found” uninstall statements describe that baseline rather than the updated application. The update documents the new source and verification separately.

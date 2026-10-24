@@ -13,9 +13,21 @@ pub mod linking;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Environment {
     pub schema: u32,
+    #[serde(default)]
+    pub request_hash: String,
+    #[serde(default)]
+    pub native_build_only: bool,
     pub compiler: PathBuf,
     pub compiler_bin: PathBuf,
+    #[serde(default)]
+    pub driver: String,
+    #[serde(default)]
+    pub process_environment: BTreeMap<String, String>,
     pub abi_hash: String,
+    #[serde(default)]
+    pub tool_identity: cpuv_core::ToolIdentity,
+    #[serde(default = "release_configuration")]
+    pub configuration: String,
     pub standard: String,
     pub include_dirs: Vec<String>,
     pub libraries: Vec<String>,
@@ -26,6 +38,11 @@ pub struct Environment {
     pub link_model: u32,
     #[serde(default)]
     pub link_flags: Vec<String>,
+    /// Ordered linker operands; libraries and stateful flags must stay together.
+    #[serde(default)]
+    pub link_items: Vec<String>,
+    #[serde(default)]
+    pub link_group: bool,
     #[serde(default)]
     pub library_dirs: Vec<String>,
     #[serde(default)]
@@ -38,23 +55,37 @@ pub struct Environment {
     pub source_flags: Vec<String>,
 }
 
+fn release_configuration() -> String {
+    "Release".into()
+}
+
 pub fn msys_host_bin(compiler_bin: &Path) -> Option<PathBuf> {
     let bin = compiler_bin.parent()?.parent()?.join("usr/bin");
     bin.join("pacman.exe").is_file().then_some(bin)
 }
 
-fn expand(s: &str, vars: &BTreeMap<String, String>) -> String {
+fn expand(s: &str, vars: &BTreeMap<String, String>) -> Result<String> {
     let mut result = s.to_owned();
     for _ in 0..12 {
         let old = result.clone();
         for (name, value) in vars {
-            result = result.replace(&format!("${{{name}}}"), value);
+            let pattern = format!("${{{name}}}");
+            let growth = result
+                .matches(&pattern)
+                .count()
+                .checked_mul(value.len())
+                .context("pkg-config expansion overflow")?;
+            ensure!(
+                result.len().saturating_add(growth) <= 1024 * 1024,
+                "pkg-config expansion exceeds 1 MiB"
+            );
+            result = result.replace(&pattern, value);
         }
         if old == result {
             break;
         }
     }
-    result
+    Ok(result)
 }
 
 fn replace_private(path: &Path, text: &str) -> Result<()> {
@@ -80,7 +111,10 @@ pub fn index_environment(
             continue;
         }
         let path = entry.path();
-        if path.extension().is_some_and(|x| x == "pc") {
+        if path
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("pc"))
+        {
             let text = fs::read_to_string(path)?;
             // Relocate common MSYS2 prefixes, preserving variable-based definitions.
             let pc_dir = path.parent().unwrap();
@@ -99,7 +133,10 @@ pub fn index_environment(
                 .join("\n")
                 + "\n";
             replace_private(path, &normalized)?;
-        } else if path.extension().is_some_and(|x| x == "cmake") {
+        } else if path
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("cmake"))
+        {
             let text = fs::read_to_string(path)?;
             if ["/ucrt64/", "/mingw64/", "/mingw32/"]
                 .iter()
@@ -127,17 +164,25 @@ pub fn index_environment(
     }
     let metadata = Environment {
         schema: 1,
+        request_hash: String::new(),
+        native_build_only: false,
         compiler_bin: compiler.parent().context("No compiler bin")?.to_owned(),
+        driver: "gnu".into(),
+        process_environment: Default::default(),
         compiler,
         abi_hash,
+        tool_identity: Default::default(),
+        configuration: release_configuration(),
         standard,
         include_dirs: includes.into_iter().collect(),
         libraries,
         defines: vec![],
         cflags: vec![],
         include_map,
-        link_model: 2,
+        link_model: 3,
         link_flags: vec![],
+        link_items: vec![],
+        link_group: false,
         library_dirs: vec!["lib".into()],
         managed_binaries: false,
         dependency_origin: "native".into(),
@@ -163,7 +208,8 @@ pub fn portable(path: &Path) -> String {
 }
 
 pub fn generate_specs(env: &Environment) -> String {
-    if !env.cflags.is_empty()
+    if !env.link_items.is_empty()
+        || !env.cflags.is_empty()
         || !env.link_flags.is_empty()
         || env.library_dirs.iter().any(|path| path != "lib")
     {
@@ -322,9 +368,16 @@ pub fn compiler_args(
     use std::ffi::OsString;
     ensure!(metadata.schema == 1, "Unsupported environment schema");
     ensure!(
-        metadata.link_model == 2,
+        metadata.link_model == 3,
         "Legacy link metadata; run cpuv sync to regenerate a package-metadata link plan"
     );
+    ensure!(
+        !metadata.native_build_only || is_compiler_query(input) || input.iter().any(|a| a == "/?"),
+        "This provider exports native CMake targets; use cpuv build/test to consume these dependencies"
+    );
+    if metadata.driver == "msvc" {
+        return msvc_args(metadata, env, input);
+    }
     let mut out = input.to_vec();
     if is_compiler_query(input) {
         return Ok(out);
@@ -352,7 +405,7 @@ pub fn compiler_args(
     }
     out.extend(metadata.cflags.iter().map(OsString::from));
     if !compile_only
-        && (!metadata.libraries.is_empty() || !metadata.link_flags.is_empty())
+        && (!metadata.link_items.is_empty() || !metadata.link_flags.is_empty())
         && !input
             .iter()
             .any(|s| matches!(s.to_str(), Some("-nostdlib" | "-nodefaultlibs")))
@@ -361,20 +414,142 @@ pub fn compiler_args(
             out.push("-L".into());
             out.push(env.join(directory).into_os_string());
         }
-        let grouped = metadata.dependency_origin != "source" && metadata.managed_binaries;
+        let grouped = metadata.link_group;
         if grouped {
             out.push("-Wl,--start-group".into());
         }
-        out.extend(
-            metadata
-                .libraries
-                .iter()
-                .map(|lib| OsString::from(format!("-l{lib}"))),
-        );
+        out.extend(metadata.link_items.iter().map(OsString::from));
         if grouped {
             out.push("-Wl,--end-group".into());
         }
-        out.extend(metadata.link_flags.iter().map(OsString::from));
+    }
+    Ok(out)
+}
+
+fn msvc_args(
+    metadata: &Environment,
+    env: &Path,
+    input: &[std::ffi::OsString],
+) -> Result<Vec<std::ffi::OsString>> {
+    use std::ffi::OsString;
+    if is_compiler_query(input) || input.iter().any(|s| s == "/?") {
+        return Ok(input.to_vec());
+    }
+    if metadata.managed_binaries {
+        let expected = if metadata.configuration == "Debug" {
+            "/MDd"
+        } else {
+            "/MD"
+        };
+        for arg in input {
+            let arg = arg.to_string_lossy();
+            if ["/MD", "/MDd", "/MT", "/MTd"].contains(&arg.as_ref()) {
+                ensure!(
+                    arg == expected,
+                    "Runtime flag {arg} disagrees with dependency profile {expected}; create a matching profile"
+                );
+            }
+            ensure!(
+                !arg.contains("_ITERATOR_DEBUG_LEVEL") && !arg.starts_with("/Zp"),
+                "ABI-changing flag {arg} requires a matching source dependency profile"
+            );
+        }
+    }
+    let divider = input
+        .iter()
+        .position(|s| s.to_string_lossy().eq_ignore_ascii_case("/link"))
+        .unwrap_or(input.len());
+    let mut out = input[..divider].to_vec();
+    let compile_only = input.iter().any(|s| {
+        ["/c", "-c", "/e", "/ep", "/p", "/zs"]
+            .contains(&s.to_string_lossy().to_ascii_lowercase().as_str())
+    });
+    if !input
+        .iter()
+        .any(|s| s.to_string_lossy().starts_with("/std:"))
+        && metadata.standard != "default"
+    {
+        let standard = metadata.standard.replace("gnu++", "c++");
+        ensure!(
+            ["c++14", "c++17", "c++20", "c++23", "c++26"].contains(&standard.as_str()),
+            "MSVC requires C++14 or newer when selecting an explicit standard"
+        );
+        out.push(
+            format!(
+                "/std:{}",
+                if ["c++23", "c++26"].contains(&standard.as_str()) {
+                    "c++latest"
+                } else {
+                    &standard
+                }
+            )
+            .into(),
+        );
+    }
+    if !input.iter().any(|s| s.to_string_lossy().starts_with("/EH")) {
+        out.push("/EHsc".into());
+    }
+    if !input
+        .iter()
+        .any(|s| ["/MD", "/MDd", "/MT", "/MTd"].contains(&s.to_string_lossy().as_ref()))
+    {
+        out.push(
+            if metadata.configuration == "Debug" {
+                "/MDd"
+            } else {
+                "/MD"
+            }
+            .into(),
+        );
+    }
+    for path in &metadata.include_dirs {
+        out.push(format!("/I{}", env.join(path).display()).into());
+    }
+    for define in &metadata.defines {
+        out.push(format!("/D{define}").into());
+    }
+    out.extend(metadata.cflags.iter().map(OsString::from));
+    if !compile_only {
+        out.push("/link".into());
+        if divider < input.len() {
+            out.extend_from_slice(&input[divider + 1..]);
+        }
+        for directory in &metadata.library_dirs {
+            out.push(format!("/LIBPATH:{}", env.join(directory).display()).into());
+        }
+        let mut whole = false;
+        for item in &metadata.link_items {
+            match item.as_str() {
+                "-Wl,--whole-archive" => {
+                    whole = true;
+                    continue;
+                }
+                "-Wl,--no-whole-archive" => {
+                    whole = false;
+                    continue;
+                }
+                _ => (),
+            }
+            if let Some(name) = item.strip_prefix("-l") {
+                ensure!(
+                    !name.starts_with(':'),
+                    "MSVC cannot consume GNU exact-name library operands"
+                );
+                out.push(
+                    format!("{}{}.lib", if whole { "/WHOLEARCHIVE:" } else { "" }, name).into(),
+                );
+            } else {
+                ensure!(
+                    !item.starts_with('-'),
+                    "GNU linker option {item} cannot be passed to the MSVC linker; fix the provider interface"
+                );
+                out.push(item.into());
+            }
+        }
+        ensure!(
+            !whole,
+            "Unterminated whole-archive scope in package metadata"
+        );
     }
     Ok(out)
 }

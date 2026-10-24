@@ -34,11 +34,11 @@ CPPFLAGS applies to C and C++; CFLAGS applies to C; CXXFLAGS applies to C++; LDF
 
 ```powershell
 $env:CXXFLAGS = '-O2 -D_GLIBCXX_USE_CXX11_ABI=0'
-cpuv sync
+cpuv lock
 cpuv run g++ program.cpp
 ```
 
-Unset variables retain locked values. Remove the profile variables and run cpuv sync --reset-profile to clear them. Run sync after changing settings. Common conflicting consumer ABI overrides are rejected. Matching inputs are compatibility evidence, not proof of every interface. The adapter clears implicit CMake Release C/C++ flags; upstream target-specific options remain controlled by upstream metadata.
+Unset variables retain locked values. Remove the profile variables and run cpuv lock --reset-profile to clear them. Run lock after changing settings; sync rejects disagreement with the selected request/profile. Common conflicting consumer ABI overrides are rejected. Matching inputs are compatibility evidence, not proof of every interface. The adapter clears implicit CMake Release C/C++ flags; upstream target-specific options remain controlled by upstream metadata.
 
 ## Tooling and transfers
 
@@ -52,7 +52,7 @@ cpuv byte, extraction, and timeout limits cover MSYS2 and bootstrap archives onl
 
 ## Locks, cache, and deployment
 
-Version-3 cpuv.lock embeds upstream revision references, resolved package versions, observations, and portable flags. Local executable/cache paths stay in .cpuv and the shared cache. Commit cpuv.toml and cpuv.lock; exclude .cpuv. Legacy source manifests and version-2 locks migrate during successful synchronization, resolving catalog metadata anew.
+Version-3 cpuv.lock embeds upstream revision references, resolved package versions, observations, and portable flags. Local executable/cache paths stay in .cpuv and the shared cache. Commit cpuv.toml and cpuv.lock; exclude .cpuv. Use an explicit lock update for legacy requests that require resolving catalog metadata; ordinary sync does not silently resolve a missing/incompatible catalog lock.
 
 Profile identities separate Conan homes and participate in package IDs. Upstream header-only/tool recipes may intentionally reduce identities. cpuv checks Conan cache manifests before and after installation, deploys host packages privately, relocates generated paths, collects DLLs with collision checks, and inspects binaries before committing. Failure preserves the active environment and configuration; failed restoration preserves recovery backups.
 
@@ -76,3 +76,7 @@ For executable selection, archive classification errors, native tool profiles, a
 ## Additional Conan remotes and recipes
 
 cpuv conan exposes upstream remote, export, create, profile, and cache commands in the same managed compiler/profile home used by synchronization. Default profiles select that GCC and saved flags. Full recipe references (name/version@user/channel, optionally #revision) can be passed to cpuv add or declared with a reference field in a dependency table. They select Conan for the whole graph; distribute private/local recipes separately from cpuv.lock. See [Windows providers and toolchains](windows-providers.md) for commands and trust boundaries.
+
+## Version 0.0.4 configurations
+
+Conan supports the implemented MSVC and GNU-style Clang profiles in addition to GCC. Named profiles isolate their manifests/locks/environments. Detailed dependencies accept generic `options` and explicit `linkage = "shared"` or `"static"`; cpuv verifies the provider setting and required artifacts before commit. CMakeDeps/CMakeToolchain preserve native targets for `cpuv build` and `cpuv test`. Supported combinations and remaining limits are listed in [compatibility](compatibility.md).

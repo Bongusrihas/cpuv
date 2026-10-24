@@ -3,6 +3,16 @@ use super::*;
 use std::collections::BTreeSet;
 mod archive;
 mod tools;
+pub async fn build_tools(cli: &Cli) -> Result<(PathBuf, PathBuf)> {
+    let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
+    tools::build_tools(
+        &registry,
+        &cache_dir(cli)?.join("catalog"),
+        cli.offline,
+        &cli.transfer_limits(),
+    )
+    .await
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct Archive {
     url: String,
@@ -68,12 +78,26 @@ pub fn reference_name(reference: &str) -> Result<&str> {
     );
     Ok(name)
 }
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Profile {
     cpp: Vec<String>,
     c: Vec<String>,
     cxx: Vec<String>,
     link: Vec<String>,
+    #[serde(default = "release_configuration")]
+    configuration: String,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            cpp: vec![],
+            c: vec![],
+            cxx: vec![],
+            link: vec![],
+            configuration: release_configuration(),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -125,13 +149,14 @@ impl Profile {
             }
         };
         Ok(Self {
+            configuration: previous.configuration,
             cpp: flags("CPPFLAGS", previous.cpp)?,
             c: flags("CFLAGS", previous.c)?,
             cxx: flags("CXXFLAGS", previous.cxx)?,
             link: flags("LDFLAGS", previous.link)?,
         })
     }
-    fn compiler_flags(&self, standard: &str) -> Vec<OsString> {
+    fn compiler_flags(&self, standard: &str, msvc: bool) -> Vec<OsString> {
         let mut flags: Vec<OsString> = self
             .cpp
             .iter()
@@ -139,11 +164,24 @@ impl Profile {
             .map(OsString::from)
             .collect();
         if standard != "default"
-            && !flags
-                .iter()
-                .any(|s| s.to_string_lossy().starts_with("-std="))
+            && !flags.iter().any(|s| {
+                let text = s.to_string_lossy();
+                text.starts_with("-std=") || text.starts_with("/std:")
+            })
         {
-            flags.push(format!("-std={standard}").into());
+            flags.push(if msvc {
+                format!(
+                    "/std:{}",
+                    if ["c++23", "c++26", "gnu++23", "gnu++26"].contains(&standard) {
+                        "c++latest".to_owned()
+                    } else {
+                        standard.replace("gnu++", "c++")
+                    }
+                )
+                .into()
+            } else {
+                format!("-std={standard}").into()
+            });
         }
         flags
     }
@@ -324,23 +362,18 @@ fn configure_profile(
         tc.abi.crt_runtime != "cygwin",
         "The catalog GCC adapter currently supports native MinGW GCC, not Cygwin"
     );
-    let c = tc.compiler_path.with_file_name(
-        tc.compiler_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .replace("g++", "gcc"),
-    );
+    let c = &tc.c_compiler;
     ensure!(
         c.is_file(),
-        "Catalog builds need the matching gcc next to g++"
+        "Catalog builds need the matching C compiler: {}",
+        c.display()
     );
     let cpp: Vec<_> = profile.cpp.iter().chain(&profile.cxx).cloned().collect();
     let cflags: Vec<_> = profile.cpp.iter().chain(&profile.c).cloned().collect();
     let conf = BTreeMap::from([
         (
             "tools.build:compiler_executables",
-            serde_json::json!({"c":cpuv_relocate::portable(&c),"cpp":cpuv_relocate::portable(&tc.compiler_path)}),
+            serde_json::json!({"c":cpuv_relocate::portable(c),"cpp":cpuv_relocate::portable(&tc.compiler_path)}),
         ),
         ("tools.build:cxxflags", serde_json::json!(cpp)),
         ("tools.build:cflags", serde_json::json!(cflags)),
@@ -364,15 +397,29 @@ fn configure_profile(
         ),
         ("user.cpuv:profile", serde_json::json!(key)),
     ]);
+    let runtime = if tc.driver == "msvc" {
+        format!(
+            "compiler.runtime=dynamic\ncompiler.runtime_type={}\n",
+            profile.configuration
+        )
+    } else {
+        format!(
+            "compiler.libcxx={}\n",
+            if tc.abi.stdlib == "libc++" {
+                "libc++"
+            } else if tc.abi.glibcxx_cxx11_abi == "0" {
+                "libstdc++"
+            } else {
+                "libstdc++11"
+            }
+        )
+    };
     let mut output = format!(
-        "[settings]\nos=Windows\narch={arch}\ncompiler=gcc\ncompiler.version={}\ncompiler.libcxx={}\ncompiler.cppstd={}\nbuild_type=Release\n[conf]\n",
+        "[settings]\nos=Windows\narch={arch}\ncompiler={}\ncompiler.version={}\n{runtime}compiler.cppstd={}\nbuild_type={}\n[conf]\n",
+        tc.abi.compiler_family,
         tc.abi.compiler_abi_major,
-        if tc.abi.glibcxx_cxx11_abi == "0" {
-            "libstdc++"
-        } else {
-            "libstdc++11"
-        },
-        standard(tc)?
+        standard(tc)?,
+        profile.configuration
     );
     for (name, value) in conf {
         let encoded = match value {
@@ -384,6 +431,18 @@ fn configure_profile(
             "Invalid newline in catalog build profile"
         );
         output.push_str(&format!("{name}={encoded}\n"));
+    }
+    if !tc.environment.is_empty() {
+        output.push_str("[buildenv]\n");
+        for name in ["INCLUDE", "LIB", "LIBPATH"] {
+            if let Some(value) = tc.environment.get(name) {
+                ensure!(
+                    !value.contains(['\n', '\r']),
+                    "Invalid developer environment value"
+                );
+                output.push_str(&format!("{name}={value}\n"));
+            }
+        }
     }
     append_platform_tools(&mut output, platform_tools)?;
     Ok(output)
@@ -491,6 +550,50 @@ fn modules_for(node: &serde_json::Value, name: &str) -> Vec<String> {
     modules
 }
 
+fn verify_requested_linkage(
+    name: &str,
+    dependency: Option<&Dependency>,
+    node: &serde_json::Value,
+    files: &[PathBuf],
+) -> Result<()> {
+    let Some(Dependency::Detailed {
+        linkage: Some(linkage),
+        ..
+    }) = dependency
+    else {
+        return Ok(());
+    };
+    let shared = node["options"]["shared"].as_bool().or_else(|| {
+        node["options"]["shared"].as_str().and_then(|value| {
+            if value.eq_ignore_ascii_case("true") {
+                Some(true)
+            } else if value.eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+    });
+    let expected = linkage == "shared";
+    ensure!(
+        shared == Some(expected),
+        "Package {name} did not resolve the requested {linkage} linkage; choose a recipe/configuration that supports it"
+    );
+    let artifact = files.iter().any(|path| {
+        let path = path.to_string_lossy().to_ascii_lowercase();
+        if expected {
+            path.ends_with(".dll")
+        } else {
+            (path.ends_with(".a") && !path.ends_with(".dll.a")) || path.ends_with(".lib")
+        }
+    });
+    ensure!(
+        artifact,
+        "Package {name} declares {linkage} linkage but supplies no matching Windows artifact; unsupported/header-only recipes cannot force this linkage"
+    );
+    Ok(())
+}
+
 fn prepare_metadata(
     env: &Path,
     final_env: &Path,
@@ -498,20 +601,30 @@ fn prepare_metadata(
     tc: &Toolchain,
     profile: &Profile,
     graph: &serde_json::Value,
+    identity: &cpuv_core::ToolIdentity,
 ) -> Result<BTreeMap<String, String>> {
+    fs::write(env.join("request.toml"), toml::to_string_pretty(manifest)?)?;
     let mut metadata = cpuv_relocate::Environment {
         schema: 1,
+        request_hash: request_hash(manifest)?,
+        native_build_only: false,
         compiler: tc.compiler_path.clone(),
         compiler_bin: tc.compiler_path.parent().unwrap().to_owned(),
+        driver: tc.driver.clone(),
+        process_environment: tc.environment.clone(),
         abi_hash: tc.abi_hash.clone(),
+        tool_identity: identity.clone(),
+        configuration: manifest.project.configuration.clone(),
         standard: manifest.project.std.clone(),
         include_dirs: vec![],
         libraries: vec![],
         defines: vec![],
         cflags: vec![],
         include_map: BTreeMap::new(),
-        link_model: 2,
+        link_model: 3,
         link_flags: vec![],
+        link_items: vec![],
+        link_group: false,
         library_dirs: vec![],
         managed_binaries: false,
         dependency_origin: "source".into(),
@@ -553,7 +666,10 @@ fn prepare_metadata(
             );
             if entry.file_type().is_file() {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "dll") {
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+                {
                     let destination = env.join("bin").join(path.file_name().unwrap());
                     if destination.exists() {
                         ensure!(
@@ -565,7 +681,10 @@ fn prepare_metadata(
                         fs::copy(path, destination)?;
                     }
                 }
-                if !path.extension().is_some_and(|ext| ext == "pc") {
+                if !path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pc"))
+                {
                     files.push(path.strip_prefix(env)?.to_owned());
                 }
             }
@@ -588,8 +707,11 @@ fn prepare_metadata(
                 files.push(PathBuf::from(format!("{module}.pc")));
             }
         }
+        verify_requested_linkage(name, manifest.dependencies.get(name), node, &files)?;
         packages.push(cpuv_relocate::linking::PackageFiles {
             name: name.to_owned(),
+            static_link: node["options"]["shared"].as_bool() == Some(false)
+                || node["options"]["shared"].as_str() == Some("False"),
             files,
         });
     }
@@ -606,6 +728,7 @@ fn prepare_metadata(
         .cflags
         .extend(profile.cpp.iter().chain(&profile.cxx).cloned());
     metadata.link_flags.extend(profile.link.clone());
+    metadata.link_items.extend(profile.link.clone());
     cpuv_relocate::validate_profile(&metadata, &[])?;
     let inspection =
         cpuv_relocate::inspect::environment_for_runtime(env, &tc.abi.arch, &tc.abi.crt_runtime)?;
@@ -643,6 +766,7 @@ fn prepare_metadata(
 
 struct CatalogContext {
     tc: Toolchain,
+    identity: cpuv_core::ToolIdentity,
     base: PathBuf,
     home: PathBuf,
     tools: tools::Tools,
@@ -659,7 +783,23 @@ async fn prepare_context(
     profile: &Profile,
     standard: &str,
 ) -> Result<CatalogContext> {
-    let flags = profile.compiler_flags(standard);
+    if base_tc.driver == "msvc" {
+        let expected = if profile.configuration == "Debug" {
+            "/MDd"
+        } else {
+            "/MD"
+        };
+        for flag in profile.cpp.iter().chain(&profile.c).chain(&profile.cxx) {
+            if ["/MD", "/MDd", "/MT", "/MTd"].contains(&flag.as_str()) {
+                ensure!(
+                    flag == expected,
+                    "Runtime flag {flag} disagrees with configuration {}; use {expected}",
+                    profile.configuration
+                );
+            }
+        }
+    }
+    let flags = profile.compiler_flags(standard, base_tc.driver == "msvc");
     let tc = cpuv_toolchain::probe_with_flags(Some(&base_tc.compiler_path), &flags)?;
     let mut doctor_flags = flags.clone();
     doctor_flags.extend(profile.link.iter().map(OsString::from));
@@ -667,12 +807,9 @@ async fn prepare_context(
     let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
     let base = cache_dir(cli)?.join("catalog");
     fs::create_dir_all(&base)?;
+    let identity = cpuv_toolchain::identity(&tc)?;
     let key = blake3::hash(&serde_json::to_vec(&(
-        1,
-        &tc,
-        &profile,
-        standard,
-        archive::digest(&tc.compiler_path)?,
+        1, &tc, &profile, standard, &identity,
     ))?)
     .to_hex()
     .to_string();
@@ -697,7 +834,12 @@ async fn prepare_context(
     if let Some(host) = cpuv_relocate::msys_host_bin(tc.compiler_path.parent().unwrap()) {
         paths.push(host);
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = tc
+        .environment
+        .get("PATH")
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+    {
         paths.extend(std::env::split_paths(&path));
     }
     let path = std::env::join_paths(paths)?;
@@ -722,6 +864,7 @@ async fn prepare_context(
     }
     Ok(CatalogContext {
         tc,
+        identity,
         base,
         home,
         tools,
@@ -752,17 +895,24 @@ pub async fn execute(root: &Path, cli: &Cli, arguments: &[OsString]) -> Result<i
     } else {
         Saved::default()
     };
-    let profile = Profile::environment(if cli.reset_profile {
+    let mut profile = Profile::environment(if cli.reset_profile {
         None
     } else {
         Some(&saved.profile)
     })?;
+    profile.configuration = cli.configuration.clone().unwrap_or_else(|| {
+        read_manifest(root)
+            .map(|m| m.project.configuration)
+            .unwrap_or_else(|_| release_configuration())
+    });
     let context = prepare_context(cli, &tc, &profile, &standard).await?;
     let profiles = context.home.join("profiles");
     fs::create_dir_all(&profiles)?;
     write_atomic(&profiles.join("default"), &fs::read(&context.profile_path)?)?;
     let mut upstream = command(&context.tools.conan, &context.home, &context.path);
-    upstream.current_dir(root);
+    upstream
+        .envs(&context.tc.environment)
+        .current_dir(profiles::project_root(root)?);
     if arguments.is_empty() {
         upstream.arg("--help");
     } else {
@@ -836,6 +986,8 @@ pub async fn sync(
     struct SavedProfile {
         version: u32,
         #[serde(default)]
+        backend: String,
+        #[serde(default)]
         profile: Profile,
     }
     let saved: Option<SavedProfile> = old_text
@@ -846,7 +998,8 @@ pub async fn sync(
     ensure!(
         saved
             .as_ref()
-            .is_none_or(|lock| (1..=3).contains(&lock.version)),
+            .is_none_or(|lock| (1..=3).contains(&lock.version)
+                || refresh && lock.version == 4 && lock.backend == "vcpkg"),
         "Unsupported cpuv.lock version"
     );
     let old: Option<CatalogLock> = if saved.as_ref().is_some_and(|lock| lock.version == 3) {
@@ -854,13 +1007,24 @@ pub async fn sync(
     } else {
         None
     };
-    let profile = Profile::environment(if cli.reset_profile {
+    let mut profile = Profile::environment(if cli.reset_profile {
         None
     } else {
         saved.as_ref().map(|value| &value.profile)
     })?;
+    profile.configuration = manifest.project.configuration.clone();
+    if !refresh {
+        let previous = old
+            .as_ref()
+            .context("No compatible catalog lock; run cpuv lock to resolve explicitly")?;
+        ensure!(
+            previous.dependencies == manifest.dependencies && previous.profile == profile,
+            "Lock disagrees with manifest or build flags; run cpuv lock to resolve explicitly"
+        );
+    }
     let CatalogContext {
         tc,
+        identity,
         base,
         home,
         tools,
@@ -878,6 +1042,18 @@ pub async fn sync(
     let graph_file = stage.path().join("graph.json");
     let upstream_lock = stage.path().join("conan.lock");
     let input_lock = stage.path().join("input.lock");
+    if !refresh {
+        let previous = old
+            .as_ref()
+            .context("No compatible catalog lock; run cpuv lock to resolve explicitly")?;
+        ensure!(
+            previous.dependencies == manifest.dependencies
+                && previous.profile == profile
+                && previous.abi == tc.abi
+                && previous.gcc_version == tc.gcc_version,
+            "Lock disagrees with manifest, profile, or compiler; run cpuv lock to resolve explicitly"
+        );
+    }
     let use_lock = !refresh
         && old
             .as_ref()
@@ -893,6 +1069,7 @@ pub async fn sync(
         started.elapsed().as_nanos()
     ));
     let mut install = command(&tools.conan, &home, &path);
+    install.envs(&tc.environment).env("PATH", &path);
     // Validate provider manifests before executing cached recipes or deploying
     // cached binaries. Conan owns its package cache and its manifest format.
     run(
@@ -909,7 +1086,17 @@ pub async fn sync(
         } else {
             "--build=missing"
         })
-        .args(["-g", "PkgConfigDeps", "-d", "full_deploy", "-of"])
+        .args([
+            "-g",
+            "PkgConfigDeps",
+            "-g",
+            "CMakeDeps",
+            "-g",
+            "CMakeToolchain",
+            "-d",
+            "full_deploy",
+            "-of",
+        ])
         .arg(&env)
         .args(["--format=json", "--out-file"])
         .arg(&graph_file)
@@ -935,13 +1122,45 @@ pub async fn sync(
     }
     for (name, dependency) in &manifest.dependencies {
         install.arg(format!("--requires={}", reference(name, dependency)?));
+        if let Dependency::Detailed {
+            linkage: Some(linkage),
+            ..
+        } = dependency
+        {
+            install.arg(format!(
+                "--options={name}/*:shared={}",
+                if linkage == "shared" { "True" } else { "False" }
+            ));
+        }
+    }
+    for (name, dependency) in &manifest.dependencies {
+        if let Dependency::Detailed {
+            options, linkage, ..
+        } = dependency
+        {
+            ensure!(
+                linkage.is_none() || !options.contains_key("shared"),
+                "Use either linkage or options.shared for {name}, not both"
+            );
+            for (option, value) in options {
+                ensure!(
+                    !option.is_empty()
+                        && option
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+                        && !value.contains(['\r', '\n']),
+                    "Invalid Conan option for {name}"
+                );
+                install.arg(format!("--options={name}/*:{option}={value}"));
+            }
+        }
     }
     if manifest.dependencies.is_empty() {
         fs::write(stage.path().join("conanfile.txt"), "[requires]\n")?;
         install.arg(stage.path().join("conanfile.txt"));
     }
     eprintln!(
-        "Resolving through Conan using GCC {} ({}). Build log: {}",
+        "Resolving through Conan using compiler {} ({}). Build log: {}",
         tc.gcc_version,
         tc.runtime_tag(),
         log.display()
@@ -952,6 +1171,9 @@ pub async fn sync(
         &log,
     )?;
     let graph: serde_json::Value = serde_json::from_slice(&fs::read(&graph_file)?)?;
+    identity.verify().context(
+        "Compiler/SDK changed while packages were being built; previous environment is preserved",
+    )?;
     let versions = prepare_metadata(
         &env,
         &root.join(".cpuv/env"),
@@ -959,6 +1181,7 @@ pub async fn sync(
         &tc,
         &profile,
         &graph,
+        &identity,
     )?;
     let locked = CatalogLock {
         version: 3,
@@ -982,11 +1205,12 @@ pub async fn sync(
         env.join("catalog-files.json"),
         serde_json::to_vec_pretty(&inventory)?,
     )?;
+    cpuv_core::seal(&env)?;
     let mut manifest = manifest.clone();
     manifest.backend = Backend::Conan;
     manifest.toolchain = PinnedToolchain {
         target: tc.abi.target_triple.clone(),
-        compiler: format!("gcc@{}", tc.gcc_version),
+        compiler: tc.compiler_id(),
         abi: tc.runtime_tag(),
     };
     fs::write(
@@ -1002,14 +1226,16 @@ pub async fn sync(
         serde_json::to_vec_pretty(&tc)?,
     )?;
     fs::write(stage.path().join("activate.ps1"), activation(root, &tc)?)?;
-    install_shim(root)?;
+    stage_auxiliary(stage.path(), root, &tc)?;
     commit(root, stage)?;
-    fs::write(
-        root.join(".cpuv/last-sync.json"),
-        serde_json::to_vec_pretty(
+    if let Err(error) = write_atomic(
+        &root.join(".cpuv/last-sync.json"),
+        &serde_json::to_vec_pretty(
             &serde_json::json!({"backend":"conan","packages":locked.packages.len(),"total_ms":started.elapsed().as_secs_f64()*1000.0}),
         )?,
-    )?;
+    ) {
+        eprintln!("warning: environment committed, but sync report could not be saved: {error:#}");
+    }
     eprintln!(
         "Ready from community catalog: {} packages",
         locked.packages.len()
@@ -1031,59 +1257,60 @@ pub fn info(root: &Path) -> Result<()> {
 }
 
 fn commit(root: &Path, stage: tempfile::TempDir) -> Result<()> {
-    let targets = [
-        (".cpuv/env", "env"),
-        ("cpuv.toml", "cpuv.toml"),
-        ("cpuv.lock", "cpuv.lock"),
-        (".cpuv/toolchain.json", "toolchain.json"),
-        (".cpuv/activate.ps1", "activate.ps1"),
-    ];
-    let mut committed = Vec::new();
-    let transaction: Result<()> = (|| {
-        for (index, (target, staged)) in targets.iter().enumerate() {
-            let destination = root.join(target);
-            let backup = stage.path().join(format!("backup-{index}"));
-            let existed = destination.exists();
-            if existed {
-                fs::rename(&destination, &backup)?;
-            }
-            committed.push((index, existed));
-            fs::rename(stage.path().join(staged), &destination)?;
+    cpuv_core::commit(
+        root,
+        stage,
+        &[
+            (".cpuv/env", "env"),
+            ("cpuv.toml", "cpuv.toml"),
+            ("cpuv.lock", "cpuv.lock"),
+            (".cpuv/toolchain.json", "toolchain.json"),
+            (".cpuv/activate.ps1", "activate.ps1"),
+            (".cpuv/bin", "bin"),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn dependency(linkage: &str) -> Dependency {
+        Dependency::Detailed {
+            version: "*".into(),
+            linkage: Some(linkage.into()),
+            reference: None,
+            options: BTreeMap::new(),
         }
-        Ok(())
-    })();
-    if let Err(error) = transaction {
-        let mut recovery_errors = Vec::new();
-        for (index, existed) in committed.into_iter().rev() {
-            let (target, _) = targets[index];
-            let destination = root.join(target);
-            if destination.exists()
-                && let Err(failure) = fs::rename(
-                    &destination,
-                    stage.path().join(format!("uncommitted-{index}")),
-                )
-            {
-                recovery_errors.push(failure.to_string());
-                continue;
-            }
-            if existed
-                && let Err(failure) = fs::rename(
-                    stage.path().join(format!("backup-{index}")),
-                    root.join(target),
-                )
-            {
-                recovery_errors.push(failure.to_string());
-            }
-        }
-        if !recovery_errors.is_empty() {
-            let recovery = stage.keep();
-            bail!(
-                "Catalog update failed: {error:#}. Automatic restoration was incomplete: {}. Preserved backups: {}",
-                recovery_errors.join("; "),
-                recovery.display()
-            );
-        }
-        return Err(error);
     }
-    Ok(())
+    #[test]
+    fn forced_linkage_requires_provider_setting_and_matching_artifact() {
+        let shared = dependency("shared");
+        assert!(
+            verify_requested_linkage(
+                "test",
+                Some(&shared),
+                &serde_json::json!({"options":{}}),
+                &["test.DLL".into()]
+            )
+            .is_err()
+        );
+        let node = serde_json::json!({"options":{"shared":"True"}});
+        assert!(
+            verify_requested_linkage("test", Some(&shared), &node, &["test.a".into()]).is_err()
+        );
+        verify_requested_linkage("test", Some(&shared), &node, &["test.DLL".into()]).unwrap();
+        let static_dependency = dependency("static");
+        let node = serde_json::json!({"options":{"shared":false}});
+        assert!(
+            verify_requested_linkage(
+                "test",
+                Some(&static_dependency),
+                &node,
+                &["test.dll.a".into()]
+            )
+            .is_err()
+        );
+        verify_requested_linkage("test", Some(&static_dependency), &node, &["test.a".into()])
+            .unwrap();
+    }
 }

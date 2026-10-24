@@ -16,13 +16,17 @@ use std::{
     time::Instant,
 };
 
+mod build;
 mod host_tools;
 mod install;
+mod maintenance;
+mod profiles;
 mod runner;
 mod source;
 mod toolchains;
 mod uninstall;
 mod update;
+mod vcpkg;
 
 #[derive(Parser)]
 #[command(
@@ -61,10 +65,14 @@ struct Cli {
     download_timeout_secs: u64,
     #[arg(long, global = true)]
     offline: bool,
+    /// Refresh provider metadata during resolution; use cpuv lock to update a locked graph.
     #[arg(long, global = true)]
     refresh: bool,
     #[arg(long, global = true)]
     compiler: Option<PathBuf>,
+    /// Choose the provider for the entire dependency graph.
+    #[arg(long, global = true, value_parser = ["auto", "conan", "vcpkg"])]
+    provider: Option<String>,
     /// Native GCC used for compiling build tools, independently of the target GCC.
     #[arg(long, global = true, env = "CPUV_BUILD_CXX")]
     build_compiler: Option<PathBuf>,
@@ -80,6 +88,12 @@ struct Cli {
     /// Clear saved source-build flags before applying the current environment.
     #[arg(long, global = true)]
     reset_profile: bool,
+    /// Use an isolated named profile created with cpuv profile create.
+    #[arg(long, global = true)]
+    profile: Option<String>,
+    /// Dependency and project build configuration.
+    #[arg(long, global = true, value_parser = ["Release", "Debug"])]
+    configuration: Option<String>,
     #[command(subcommand)]
     command: Action,
 }
@@ -98,6 +112,32 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Export an executable and its verified runtime closure to a new directory.
+    Bundle {
+        binary: PathBuf,
+        destination: PathBuf,
+        #[arg(long = "asset")]
+        assets: Vec<PathBuf>,
+    },
+    /// Check every environment and toolchain file against its saved digest.
+    Verify,
+    /// Explain the installed compiler, dependency request and ordered link plan.
+    Plan,
+    /// Create and inspect isolated compiler/configuration profiles.
+    Profile {
+        #[command(subcommand)]
+        command: profiles::Action,
+    },
+    /// Configure and build a CMake project with the selected environment.
+    Build {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
+    /// Build a CMake project and execute its CTest suite.
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
     /// Uninstall the invoked cpuv application; keep projects and package caches.
     Uninstall(uninstall::Options),
     /// Manage the installed cpuv executable.
@@ -170,17 +210,23 @@ enum SelfAction {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Project {
     name: String,
     version: String,
     #[serde(default = "default_standard")]
     std: String,
+    #[serde(default = "release_configuration")]
+    configuration: String,
+}
+fn release_configuration() -> String {
+    "Release".into()
 }
 fn default_standard() -> String {
     "c++20".into()
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 enum Dependency {
     Simple(String),
     Detailed {
@@ -190,6 +236,8 @@ enum Dependency {
         linkage: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        options: BTreeMap<String, String>,
     },
 }
 fn any_version() -> String {
@@ -203,8 +251,10 @@ impl Dependency {
                 version, linkage, ..
             } => {
                 ensure!(
-                    linkage.as_deref().is_none_or(|s| s == "shared"),
-                    "Linkage is defined by the selected provider or upstream package metadata; this declaration supports default/shared linkage"
+                    linkage
+                        .as_deref()
+                        .is_none_or(|s| matches!(s, "shared" | "static")),
+                    "Linkage is defined by the selected provider or upstream package metadata; choose shared or static linkage"
                 );
                 Ok(version)
             }
@@ -212,12 +262,14 @@ impl Dependency {
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PinnedToolchain {
     target: String,
     compiler: String,
     abi: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     #[serde(default, skip_serializing_if = "backend_is_auto")]
     backend: Backend,
@@ -227,6 +279,8 @@ struct Manifest {
     dependencies: BTreeMap<String, Dependency>,
     #[serde(default, skip_serializing_if = "link_selection_empty")]
     link: cpuv_relocate::linking::Selection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vcpkg: Option<vcpkg::Settings>,
 }
 fn link_selection_empty(selection: &cpuv_relocate::linking::Selection) -> bool {
     selection == &cpuv_relocate::linking::Selection::default()
@@ -236,6 +290,7 @@ fn link_selection_empty(selection: &cpuv_relocate::linking::Selection) -> bool {
 enum Backend {
     #[default]
     Auto,
+    Vcpkg,
     #[serde(alias = "source")]
     Conan,
 }
@@ -262,21 +317,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn project_lock(root: &Path) -> Result<File> {
     runner::state_directory(root)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(root.join(".cpuv/project.lock"))?;
-    file.try_lock_exclusive()
-        .context("Another cpuv operation is using this project; retry when it finishes")?;
-    Ok(file)
+    cpuv_core::lease(root, true)
 }
 
 fn read_manifest(root: &Path) -> Result<Manifest> {
     let text = fs::read_to_string(root.join("cpuv.toml"))
         .context("No cpuv.toml found; run cpuv init first")?;
     let m: Manifest = toml::from_str(&text).context("Invalid cpuv.toml")?;
+    ensure!(
+        ["Release", "Debug"].contains(&m.project.configuration.as_str()),
+        "project.configuration must be Release or Debug"
+    );
     ensure!(
         [
             "c++98", "c++03", "c++11", "c++14", "c++17", "c++20", "c++23", "c++26", "gnu++98",
@@ -288,10 +339,16 @@ fn read_manifest(root: &Path) -> Result<Manifest> {
     Ok(m)
 }
 
+fn request_hash(manifest: &Manifest) -> Result<String> {
+    Ok(blake3::hash(&serde_json::to_vec(manifest)?)
+        .to_hex()
+        .to_string())
+}
+
 fn check_toolchain(manifest: &Manifest, tc: &Toolchain) -> Result<()> {
     ensure!(
         manifest.toolchain.target == tc.abi.target_triple
-            && manifest.toolchain.compiler == format!("gcc@{}", tc.gcc_version)
+            && manifest.toolchain.compiler == tc.compiler_id()
             && (manifest.toolchain.abi == tc.runtime_tag()
                 || manifest.toolchain.abi == "ucrt64-posix-seh"
                     && tc.provider.as_ref().is_some_and(|p| p.name == "ucrt64")),
@@ -331,15 +388,37 @@ fn requirements(m: &Manifest) -> Result<Vec<String>> {
         .collect()
 }
 
-fn install_shim(root: &Path) -> Result<()> {
+fn install_shim(root: &Path, tc: &Toolchain) -> Result<()> {
     // Use this exact executable as a multicall shim. This also makes a single
     // cargo-installed cpuv sufficient and prevents stale sibling-shim versions.
     let binary = std::env::current_exe()?;
     let dir = root.join(".cpuv/bin");
     fs::create_dir_all(&dir)?;
     // Copy: linking a compiler shim to target/ would lock Cargo's build output on Windows.
-    fs::copy(binary, dir.join("g++.exe"))
-        .context("Installing compiler shim (close active compiler processes first)")?;
+    fs::copy(
+        binary,
+        dir.join(if tc.driver == "msvc" {
+            "cl.exe"
+        } else {
+            "g++.exe"
+        }),
+    )
+    .context("Installing compiler shim (close active compiler processes first)")?;
+    Ok(())
+}
+
+fn stage_auxiliary(stage: &Path, root: &Path, tc: &Toolchain) -> Result<()> {
+    fs::write(stage.join("toolchain.json"), serde_json::to_vec_pretty(tc)?)?;
+    fs::write(stage.join("activate.ps1"), activation(root, tc)?)?;
+    fs::create_dir_all(stage.join("bin"))?;
+    fs::copy(
+        std::env::current_exe()?,
+        stage.join(if tc.driver == "msvc" {
+            "bin/cl.exe"
+        } else {
+            "bin/g++.exe"
+        }),
+    )?;
     Ok(())
 }
 
@@ -349,11 +428,33 @@ fn activation(root: &Path, tc: &Toolchain) -> Result<String> {
     let host =
         cpuv_relocate::msys_host_bin(tc.compiler_path.parent().context("Missing compiler bin")?)
             .map_or(String::new(), |path| format!("{};", quote(&path)));
-    Ok(format!(
-        "$env:CPUV_ENV = '{env}'\n$env:PATH = '{};{env}/bin;{};{host}' + $env:PATH\n",
+    let mut script = String::new();
+    for (name, value) in &tc.environment {
+        if name != "PATH"
+            && [
+                "INCLUDE",
+                "LIB",
+                "LIBPATH",
+                "WINDOWSSDKDIR",
+                "WINDOWSSDKVERSION",
+                "VCTOOLSINSTALLDIR",
+                "VSINSTALLDIR",
+            ]
+            .contains(&name.as_str())
+        {
+            script.push_str(&format!("$env:{name} = '{}'\n", value.replace('\'', "''")));
+        }
+    }
+    let sdk_path = tc
+        .environment
+        .get("PATH")
+        .map_or(String::new(), |p| format!("{};", p.replace('\'', "''")));
+    script.push_str(&format!(
+        "$env:CPUV_ENV = '{env}'\n$env:PATH = '{};{env}/bin;{};{host}{sdk_path}' + $env:PATH\n",
         quote(&root.join(".cpuv/bin")),
-        quote(&tc.sysroot.join("bin"))
-    ))
+        quote(tc.compiler_path.parent().context("Missing compiler bin")?)
+    ));
+    Ok(script)
 }
 
 fn init(root: &Path, cli: &Cli) -> Result<()> {
@@ -364,7 +465,15 @@ fn init(root: &Path, cli: &Cli) -> Result<()> {
     );
     let tc = cpuv_toolchain::probe(cli.compiler.as_deref())?;
     let m = Manifest {
-        backend: if cli.catalog
+        vcpkg: if cli.provider.as_deref() == Some("vcpkg") {
+            Some(vcpkg::Settings::default())
+        } else {
+            None
+        },
+        backend: if cli.provider.as_deref() == Some("vcpkg") {
+            Backend::Vcpkg
+        } else if cli.catalog
+            || cli.provider.as_deref() == Some("conan")
             || cli.from_source
             || tc.provider.is_none()
             || source::custom_profile_requested()
@@ -374,6 +483,10 @@ fn init(root: &Path, cli: &Cli) -> Result<()> {
             Backend::Auto
         },
         project: Project {
+            configuration: cli
+                .configuration
+                .clone()
+                .unwrap_or_else(release_configuration),
             name: root
                 .file_name()
                 .unwrap_or_default()
@@ -392,39 +505,46 @@ fn init(root: &Path, cli: &Cli) -> Result<()> {
         },
         toolchain: PinnedToolchain {
             target: tc.abi.target_triple.clone(),
-            compiler: format!("gcc@{}", tc.gcc_version),
+            compiler: tc.compiler_id(),
             abi: tc.runtime_tag(),
         },
         dependencies: BTreeMap::new(),
         link: Default::default(),
     };
-    install_shim(root)?;
-    let env = root.join(".cpuv/env");
+    if m.backend == Backend::Vcpkg {
+        vcpkg::validate(&tc, m.vcpkg.as_ref().unwrap())?;
+    }
+    let stage = tempfile::Builder::new()
+        .prefix("stage-init-")
+        .tempdir_in(root.join(".cpuv"))?;
+    let env = stage.path().join("env");
     for dir in ["include", "lib", "bin"] {
         fs::create_dir_all(env.join(dir))?;
     }
     cpuv_relocate::index_environment(
         &env,
-        &env,
+        &root.join(".cpuv/env"),
         tc.compiler_path.clone(),
         tc.abi_hash.clone(),
         m.project.std.clone(),
     )?;
     configure_environment(&env, &tc, &m, &[])?;
-    write_atomic(
-        &root.join(".cpuv/toolchain.json"),
-        &serde_json::to_vec_pretty(&tc)?,
-    )?;
-    write_atomic(
-        &root.join(".cpuv/activate.ps1"),
-        activation(root, &tc)?.as_bytes(),
-    )?;
-    write_atomic(
-        &root.join("cpuv.toml"),
-        toml::to_string_pretty(&m)?.as_bytes(),
+    cpuv_core::seal(&env)?;
+    stage_auxiliary(stage.path(), root, &tc)?;
+    fs::write(stage.path().join("cpuv.toml"), toml::to_string_pretty(&m)?)?;
+    cpuv_core::commit(
+        root,
+        stage,
+        &[
+            (".cpuv/env", "env"),
+            (".cpuv/toolchain.json", "toolchain.json"),
+            (".cpuv/activate.ps1", "activate.ps1"),
+            (".cpuv/bin", "bin"),
+            ("cpuv.toml", "cpuv.toml"),
+        ],
     )?;
     eprintln!(
-        "Initialized {} with GCC {} ({})",
+        "Initialized {} with compiler {} ({})",
         m.project.name,
         tc.gcc_version,
         tc.runtime_tag()
@@ -516,6 +636,9 @@ async fn sync(
     let start = Instant::now();
     let _guard = project_lock(root)?;
     let mut manifest = read_manifest(root)?;
+    if let Some(configuration) = &cli.configuration {
+        manifest.project.configuration = configuration.clone();
+    }
     let probe_start = Instant::now();
     let tc = cpuv_toolchain::probe(cli.compiler.as_deref())?;
     let changed_compiler = check_toolchain(&manifest, &tc).is_err();
@@ -556,6 +679,7 @@ async fn sync(
                             version: "*".into(),
                             linkage: None,
                             reference: Some(input.clone()),
+                            options: BTreeMap::new(),
                         }
                     } else {
                         Dependency::Simple(if op.is_empty() {
@@ -568,23 +692,53 @@ async fn sync(
             }
         }
     }
+    if let Some(provider) = &cli.provider {
+        manifest.backend = match provider.as_str() {
+            "vcpkg" => Backend::Vcpkg,
+            "conan" => Backend::Conan,
+            _ => Backend::Auto,
+        };
+    }
+    if manifest.backend == Backend::Vcpkg {
+        manifest.vcpkg.get_or_insert_with(Default::default);
+        manifest.toolchain = PinnedToolchain {
+            target: tc.abi.target_triple.clone(),
+            compiler: tc.compiler_id(),
+            abi: tc.runtime_tag(),
+        };
+        return vcpkg::sync(root, cli, &manifest, &tc, force_resolve || update.is_some()).await;
+    }
     let roots = requirements(&manifest)?;
     if cli.catalog
         || cli.from_source
+        || manifest.project.configuration == "Debug"
         || manifest.backend == Backend::Conan
         || tc.provider.is_none()
         || source::custom_profile_requested()
         || source::explicit_references(&manifest)
+        || manifest
+            .dependencies
+            .values()
+            .any(|d| matches!(d, Dependency::Detailed { options, .. } if !options.is_empty()))
+        || manifest.dependencies.values().any(|d| {
+            matches!(
+                d,
+                Dependency::Detailed {
+                    linkage: Some(_),
+                    ..
+                }
+            )
+        })
         || changed_compiler
         || cli.reset_profile
     {
         manifest.backend = Backend::Conan;
         manifest.toolchain = PinnedToolchain {
             target: tc.abi.target_triple.clone(),
-            compiler: format!("gcc@{}", tc.gcc_version),
+            compiler: tc.compiler_id(),
             abi: tc.runtime_tag(),
         };
-        return source::sync(root, cli, &manifest, &tc, force_resolve).await;
+        return source::sync(root, cli, &manifest, &tc, force_resolve || update.is_some()).await;
     }
     ensure!(
         roots.is_empty() || tc.provider.is_some(),
@@ -682,7 +836,7 @@ async fn sync(
                     .collect::<Vec<_>>()
                     .join("\n");
                 manifest.backend = Backend::Conan;
-                return source::sync(root, cli, &manifest, &tc, force_resolve)
+                return source::sync(root, cli, &manifest, &tc, force_resolve || update.is_some())
                     .await
                     .with_context(|| {
                         format!(
@@ -710,7 +864,8 @@ async fn sync(
                     p.version, tc.gcc_version
                 );
                 manifest.backend = Backend::Conan;
-                return source::sync(root, cli, &manifest, &tc, force_resolve).await;
+                return source::sync(root, cli, &manifest, &tc, force_resolve || update.is_some())
+                    .await;
             }
         }
     }
@@ -720,7 +875,7 @@ async fn sync(
     let mut stored = BTreeMap::<String, StoredPackage>::new();
     let mut missing = Vec::new();
     for p in &packages {
-        if let Some(s) = store.cached(p)? {
+        if let Some(s) = store.cached_or_quarantine(p)? {
             stored.insert(p.name.clone(), s);
         } else {
             missing.push(p.clone());
@@ -757,17 +912,25 @@ async fn sync(
     let stage_env = stage.path().join("env");
     let final_env = root.join(".cpuv/env");
     let link_start = Instant::now();
+    let expected_request_hash = request_hash(&manifest)?;
     let identity = serde_json::to_vec(&(
-        3,
+        7,
+        &expected_request_hash,
         &tc.provider,
         &tc.abi_hash,
         &tc.compiler_path,
         &manifest.project.std,
+        &manifest.project.configuration,
         &manifest.link,
         &packages,
     ))?;
     let environment_reused = fs::read(final_env.join("install-state.json"))
         .is_ok_and(|bytes| bytes == identity)
+        && cpuv_core::verify(&final_env).is_ok()
+        && serde_json::from_slice::<cpuv_relocate::Environment>(
+            &fs::read(final_env.join("manifest.json")).unwrap_or_default(),
+        )
+        .is_ok_and(|m| m.request_hash == expected_request_hash && m.tool_identity.verify().is_ok())
         && [
             "manifest.json",
             "include_map.json",
@@ -801,6 +964,7 @@ async fn sync(
         metadata_ms =
             (metadata_start.elapsed().as_secs_f64() * 1000.0 - binary_inspection_ms).max(0.0);
         fs::write(stage_env.join("install-state.json"), identity)?;
+        cpuv_core::seal(&stage_env)?;
         stats
     };
     let environment_prepare_ms = link_start.elapsed().as_secs_f64() * 1000.0;
@@ -820,52 +984,18 @@ async fn sync(
         stage.path().join("cpuv.lock"),
         toml::to_string_pretty(&lock)?,
     )?;
-    install_shim(root)?;
-    // Recovery uses backups until all three project artifacts have committed.
-    let mut targets = vec![("cpuv.toml", "cpuv.toml"), ("cpuv.lock", "cpuv.lock")];
+    stage_auxiliary(stage.path(), root, &tc)?;
+    let mut targets = vec![
+        ("cpuv.toml", "cpuv.toml"),
+        ("cpuv.lock", "cpuv.lock"),
+        (".cpuv/toolchain.json", "toolchain.json"),
+        (".cpuv/activate.ps1", "activate.ps1"),
+        (".cpuv/bin", "bin"),
+    ];
     if !environment_reused {
         targets.insert(0, (".cpuv/env", "env"));
     }
-    let mut swapped: Vec<(&str, String)> = Vec::new();
-    let commit: Result<()> = (|| {
-        for (target, staged) in targets {
-            let destination = root.join(target);
-            let backup = format!("backup-{staged}");
-            if destination.exists() {
-                fs::rename(&destination, stage.path().join(&backup))?;
-            }
-            if let Err(error) = fs::rename(stage.path().join(staged), &destination) {
-                if stage.path().join(&backup).exists() {
-                    fs::rename(stage.path().join(&backup), &destination)?;
-                }
-                return Err(error.into());
-            }
-            swapped.push((target, backup));
-        }
-        Ok(())
-    })();
-    if let Err(error) = commit {
-        for (target, backup) in swapped.into_iter().rev() {
-            let target = root.join(target);
-            if target.is_dir() {
-                fs::remove_dir_all(&target)?;
-            } else {
-                fs::remove_file(&target)?;
-            }
-            if stage.path().join(&backup).exists() {
-                fs::rename(stage.path().join(&backup), target)?;
-            }
-        }
-        return Err(error).context("Commit failed; previous project restored");
-    }
-    write_atomic(
-        &root.join(".cpuv/toolchain.json"),
-        &serde_json::to_vec_pretty(&tc)?,
-    )?;
-    write_atomic(
-        &root.join(".cpuv/activate.ps1"),
-        activation(root, &tc)?.as_bytes(),
-    )?;
+    cpuv_core::commit(root, stage, &targets)?;
     #[derive(Serialize)]
     struct Report<'a> {
         packages: usize,
@@ -901,10 +1031,12 @@ async fn sync(
         total_ms: start.elapsed().as_millis(),
         links: &link_stats,
     };
-    write_atomic(
+    if let Err(error) = write_atomic(
         &root.join(".cpuv/last-sync.json"),
         &serde_json::to_vec_pretty(&report)?,
-    )?;
+    ) {
+        eprintln!("warning: environment committed, but sync report could not be saved: {error:#}");
+    }
     eprintln!(
         "Ready in {} ms: {} downloaded, {} CAS hits, peak {} parallel transfers, {} hardlinks / {} copies",
         report.total_ms,
@@ -938,18 +1070,35 @@ fn configure_environment(
 ) -> Result<f64> {
     let path = env.join("manifest.json");
     let mut metadata: cpuv_relocate::Environment = serde_json::from_slice(&fs::read(&path)?)?;
+    fs::write(env.join("request.toml"), toml::to_string_pretty(manifest)?)?;
+    metadata.request_hash = request_hash(manifest)?;
+    metadata.tool_identity = cpuv_toolchain::identity(tc)?;
+    metadata.configuration = manifest.project.configuration.clone();
+    metadata.driver = tc.driver.clone();
+    metadata.process_environment = tc.environment.clone();
     let packages: Vec<_> = stored
         .iter()
         .map(|package| cpuv_relocate::linking::PackageFiles {
+            static_link: false,
             name: package.package.name.clone(),
             files: package.files.iter().map(|file| file.path.clone()).collect(),
         })
         .collect();
+    let namespace = tc
+        .provider
+        .as_ref()
+        .map_or(cpuv_solver::PREFIX, |p| p.package_prefix.as_str());
+    let index = stored
+        .iter()
+        .map(|p| (p.package.name.clone(), p.package.clone()))
+        .collect();
+    let resolved_roots =
+        cpuv_solver::root_packages_for(&index, &requirements(manifest)?, namespace)?;
     cpuv_relocate::linking::apply_for(
         env,
         &mut metadata,
         &packages,
-        &requirements(manifest)?,
+        &resolved_roots,
         &manifest.link,
         tc.provider
             .as_ref()
@@ -1021,7 +1170,7 @@ fn main() {
     }
 }
 
-async fn execute(cli: Cli) -> Result<i32> {
+async fn execute(mut cli: Cli) -> Result<i32> {
     if let Action::Uninstall(options) = &cli.command {
         return uninstall::run(options);
     }
@@ -1036,6 +1185,39 @@ async fn execute(cli: Cli) -> Result<i32> {
     } = &cli.command
     {
         return update::run(options, cli.offline).await;
+    }
+    fs::create_dir_all(&cli.project)?;
+    let mut root = cpuv_toolchain::driver_path(cli.project.canonicalize()?);
+    if let Action::Profile { command } = &cli.command {
+        return profiles::execute(command, &root, &cli);
+    }
+    if let Some(name) = &cli.profile {
+        root = profiles::directory(&root, name)?;
+        let settings: profiles::Settings = serde_json::from_slice(
+            &fs::read(root.join("profile.json"))
+                .context("Profile not found; run cpuv profile create NAME first")?,
+        )?;
+        if cli.compiler.is_none() {
+            cli.compiler = Some(
+                fs::read(root.join(".cpuv/toolchain.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Toolchain>(&bytes).ok())
+                    .map(|tc| tc.compiler_path)
+                    .unwrap_or(settings.compiler),
+            );
+        }
+        if cli.configuration.is_none() {
+            cli.configuration = Some(
+                read_manifest(&root)
+                    .map(|m| m.project.configuration)
+                    .unwrap_or(settings.configuration),
+            );
+        }
+    }
+    if cli.compiler.is_none() && root.join(".cpuv/toolchain.json").is_file() {
+        let saved: Toolchain =
+            serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
+        cli.compiler = Some(saved.compiler_path);
     }
     if let Action::Toolchain { command } = &cli.command {
         if let Some(action) = command {
@@ -1055,12 +1237,83 @@ async fn execute(cli: Cli) -> Result<i32> {
         );
         return Ok(0);
     }
-    fs::create_dir_all(&cli.project)?;
-    let root = cpuv_toolchain::driver_path(cli.project.canonicalize()?);
+    if matches!(
+        &cli.command,
+        Action::Run { .. } | Action::Build { .. } | Action::Test { .. }
+    ) {
+        let manifest = read_manifest(&root)?;
+        if let Some(configuration) = &cli.configuration {
+            ensure!(
+                configuration == &manifest.project.configuration,
+                "Configuration changed; run cpuv lock with --configuration first, or create a separate profile"
+            );
+        }
+        if let Some(compiler) = &cli.compiler {
+            let saved: Toolchain =
+                serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
+            ensure!(
+                (if compiler.is_file() {
+                    compiler.canonicalize()?
+                } else {
+                    cpuv_toolchain::probe(Some(compiler))?
+                        .compiler_path
+                        .canonicalize()?
+                }) == saved.compiler_path.canonicalize()?,
+                "Compiler changed; run cpuv lock with --compiler first, or create a separate profile"
+            );
+        }
+    }
+    if let Action::Build { arguments } | Action::Test { arguments } = &cli.command {
+        return build::execute(
+            &root,
+            &cli,
+            matches!(&cli.command, Action::Test { .. }),
+            arguments,
+        )
+        .await;
+    }
     if let Action::Conan { arguments } = &cli.command {
         return source::execute(&root, &cli, arguments).await;
     }
     match &cli.command {
+        Action::Bundle {
+            binary,
+            destination,
+            assets,
+        } => {
+            let _guard = cpuv_core::lease(&root, false)?;
+            let env = root.join(".cpuv/env");
+            cpuv_core::verify(&env)?;
+            let metadata: cpuv_relocate::Environment =
+                serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;
+            metadata.tool_identity.verify()?;
+            maintenance::validate_request(&root, &metadata)?;
+            let source = profiles::project_root(&root)?;
+            let binary = if binary.is_absolute() {
+                binary.clone()
+            } else if source.join(binary).is_file() {
+                source.join(binary)
+            } else {
+                root.join(".cpuv/build").join(binary)
+            };
+            let assets: Vec<_> = assets
+                .iter()
+                .map(|a| {
+                    if a.is_absolute() {
+                        a.clone()
+                    } else {
+                        source.join(a)
+                    }
+                })
+                .collect();
+            cpuv_shim::bundle::export(&metadata, &env, &binary, destination, &assets)?;
+            println!(
+                "Exported verified runtime files to {}",
+                destination.display()
+            );
+        }
+        Action::Verify => return maintenance::verify(&root),
+        Action::Plan => return maintenance::plan(&root),
         Action::Init => init(&root, &cli)?,
         Action::Add { packages, needed } => add(&root, &cli, packages, *needed).await?,
         Action::Remove { packages } => sync(&root, &cli, Some((packages, true)), false).await?,
@@ -1071,7 +1324,7 @@ async fn execute(cli: Cli) -> Result<i32> {
             if metadata_path.is_file()
                 && serde_json::from_slice::<cpuv_relocate::Environment>(&fs::read(&metadata_path)?)?
                     .link_model
-                    != 2
+                    != 3
             {
                 eprintln!(
                     "Updating legacy compiler metadata to the authoritative package link model..."
@@ -1079,6 +1332,7 @@ async fn execute(cli: Cli) -> Result<i32> {
                 if root.join("cpuv.lock").is_file() {
                     sync(&root, &cli, None, false).await?;
                 } else {
+                    let _guard = project_lock(&root)?;
                     let manifest = read_manifest(&root)?;
                     ensure!(
                         manifest.dependencies.is_empty(),
@@ -1093,7 +1347,8 @@ async fn execute(cli: Cli) -> Result<i32> {
                         manifest.project.std.clone(),
                     )?;
                     configure_environment(&root.join(".cpuv/env"), &tc, &manifest, &[])?;
-                    install_shim(&root)?;
+                    cpuv_core::seal(&root.join(".cpuv/env"))?;
+                    install_shim(&root, &tc)?;
                 }
             }
             return runner::run(&root, command, *no_run);
@@ -1120,7 +1375,7 @@ async fn execute(cli: Cli) -> Result<i32> {
                         "-Command",
                         &startup,
                     ])
-                    .current_dir(root)
+                    .current_dir(profiles::project_root(&root)?)
                     .status()?
                     .code()
                     .unwrap_or(1));
@@ -1133,6 +1388,13 @@ async fn execute(cli: Cli) -> Result<i32> {
                 cache_dir(&cli)?.display()
             );
             if root.join("cpuv.lock").is_file() {
+                if read_manifest(&root)?.backend == Backend::Vcpkg {
+                    print!(
+                        "{}",
+                        fs::read_to_string(root.join(".cpuv/env/provider.json"))?
+                    );
+                    return Ok(0);
+                }
                 if read_manifest(&root)?.backend == Backend::Conan {
                     source::info(&root)?;
                     return Ok(0);
@@ -1145,6 +1407,9 @@ async fn execute(cli: Cli) -> Result<i32> {
             }
         }
         Action::Toolchain { .. }
+        | Action::Profile { .. }
+        | Action::Build { .. }
+        | Action::Test { .. }
         | Action::Conan { .. }
         | Action::Doctor { .. }
         | Action::SelfCommand { .. }
