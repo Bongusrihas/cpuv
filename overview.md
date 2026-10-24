@@ -28,12 +28,13 @@ flowchart TD
 | Crate | Responsibility |
 | --- | --- |
 | cpuv-cli | Commands, catalog adapter, locks, tool bootstrap, managed run, native setup, self update, uninstall, and toolchain management |
-| cpuv-toolchain | GCC discovery, macro probes, language capabilities, ABI observations, provider eligibility |
+| cpuv-toolchain | GCC/MSVC/Clang discovery, driver environments, language/ABI observations and provider eligibility |
+| cpuv-core | Content/tool inventories, leases, durable journals, recovery and response files |
 | cpuv-solver | MSYS2 constraints, virtual providers, package-name suggestions |
 | cpuv-fetch | MSYS2 metadata and parallel downloads, retries, size/time limits, offline behavior |
 | cpuv-store | Validated extraction, BLAKE3 storage, records, hardlinks and copy fallback |
 | cpuv-relocate | Relocation, public pkg-config link plans, ABI guards, PE/COFF inspection, experimental specs |
-| cpuv-shim | Recorded GCC invocation with the prepared interface |
+| cpuv-shim | Recorded compiler invocation, response files, ordered interfaces and application runtime bundles |
 
 All first-party runtime code is included. The CLI creates its shim from its own executable. Cargo.lock pins third-party Rust dependencies. build-tools.toml pins bootstrap tools only; cpuv contains no library recipe registry or library-specific patches.
 
@@ -47,11 +48,11 @@ MSYS2 binaries require a recognized UCRT64/UCRT or MINGW64/MSVCRT x86-64 POSIX/S
 
 Missing packages, other supported native MinGW profiles, custom flags, and --catalog select ConanCenter for the whole graph. Standalone Conan/CMake/Ninja bootstrap without system Python or Rust. Upstream metadata supplies versions, dependencies, build systems, sources, tools, and interfaces. Compatible packages are reused; missing binaries build with the selected GCC. --from-source forces source builds including build requirements.
 
-Packages must exist in the catalog and support the selected compiler/platform/features/tools. Cygwin catalog builds, MSVC/Clang, vcpkg, arbitrary archives, and cross-OS adapters are outside this release.
+Packages must exist in the catalog and support the selected compiler/platform/features/tools. Cygwin catalog builds, arbitrary unregistered archives and cross-OS adapters are outside this release. MSVC/GNU-style Clang and pinned vcpkg integration follow their declared compatibility boundaries; CMake evaluates provider targets.
 
 ## Locks, profiles, and storage
 
-MSYS2 version-1 locks record versions, checksums, ownership, and an ABI filter. Catalog version-3 locks embed upstream revisions, resolved versions, compiler observations, and saved flags. Legacy source locks migrate on successful synchronization. Portable locks contain no detected local compiler/cache paths.
+MSYS2 version-1 locks record versions, checksums, ownership, and an ABI filter. Catalog version-3 locks embed upstream revisions, resolved versions, compiler observations, and saved flags. Use an explicit lock update for legacy requests requiring a new resolution. Sync remains frozen; vcpkg owns a separate version-4 lock. Portable locks contain no detected local compiler/cache paths.
 
 CPPFLAGS/CFLAGS/CXXFLAGS/LDFLAGS define the saved catalog profile. Dependencies and consumers receive the same configured inputs. Unset variables retain saved values; --reset-profile clears them before applying current values. Compiler hashes, observations, language mode, and flags separate catalog homes and participate in package identities. Header-only/tool recipes can intentionally reduce identities.
 
@@ -83,13 +84,13 @@ cpuv uninstall removes the application and recognized helpers; --dry-run preview
 
 MSYS2 and bootstrap archives have configurable concurrency (default 50), streaming download limits (16 GiB), expanded-payload limits (64 GiB), file-count limits, and timeouts. The 64 MiB index cap is separate. Conan owns catalog transfers/extraction; cpuv configures parallel binary downloads but does not wrap recipe network calls with cpuv byte/time limits.
 
-No fixed latency or uv performance equivalence is promised. Cache checks, disk, network, antivirus, and compiler startup affect timing. last-sync.json records local diagnostics; catalog logs record provider details. Test suites, simulations, benchmarks, and generated reports are excluded from this checkout.
+No fixed latency or uv performance equivalence is promised. Cache checks, disk, network, antivirus, and compiler startup affect timing. last-sync.json records local diagnostics; catalog logs record provider details. Retained unit/native/provider/installer tests are included. Generated reports, environments, binaries, caches and benchmark outputs remain excluded.
 
 Checksums identify content rather than authenticate a compromised publisher. Conan recipes execute upstream code with your permissions, including during binary resolution. Builds are not sandboxed/hermetic. Package signatures and universal ABI conversion are not implemented. See [architecture](docs/architecture.md), [catalog installation](docs/source-builds.md), [compatibility](docs/compatibility.md), and [security](SECURITY.md).
 
 ## Credits
 
-Author: **Bongu srihas**. Co-authors: **Gemini 4 argon** and **GPT-6 sol**. Version: **0.0.3**. Apache-2.0; upstream packages retain their licenses.
+Author: **Bongu srihas**. Co-authors: **Gemini 4 argon** and **GPT-6 sol**. Version: **0.0.4**. Apache-2.0; upstream packages retain their licenses.
 
 ## Windows extensions in 0.0.3
 
