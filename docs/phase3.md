@@ -9,7 +9,7 @@ $compilers=@(./scripts/select-test-compilers.ps1 -IncludeX86)
 ./scripts/test-phase3.ps1 -Compiler $compilers -EvidenceDirectory ./tmp/phase3-evidence
 ```
 
-The selector uses the numeric versions of installed Microsoft toolset directories. It chooses the oldest and newest available compiler per target architecture, removing duplicates when only one is installed. On x64 hosts the optional x86 lane runs natively under Windows emulation. On ARM64 it selects ARM64 targets and prefers ARM64-hosted tools. An installed single version is evidence for one version, never a historical matrix by itself. Explicit GCC/GNU Clang/clang-cl paths can also be passed to the gate.
+The selector uses the numeric versions of installed Microsoft toolset directories. It chooses the oldest and newest available compiler per target architecture, removing duplicates when only one is installed. On x64 hosts the optional x86 lane runs natively under Windows emulation. The native ARM64 lane requires ARM64-hosted compilers producing ARM64 targets; emulated x64-hosted cross toolsets require separate build-host profile coverage. An installed single version is evidence for one version, never a historical matrix by itself. Explicit GCC/GNU Clang/clang-cl paths can also be passed to the gate.
 
 The retained consumer fixture builds a project-owned checksummed source archive through the generic CMake adapter. It checks:
 
@@ -26,6 +26,8 @@ Phase 2 retains the broader source/SDK, ABI guard, profile, generation, runtime 
 ## Machines and evidence
 
 The Windows workflow configures Phase 3 jobs on Server 2022, Server 2025, and the native `windows-11-arm` runner. Each job retains source hashes, OS/process architecture, actual compiler observations, logs, and measurements. ARM64 native execution is claimed only after that job actually passes. The compiler and library versions in the evidence define the tested boundary.
+
+The first ARM64 run exposed an unnecessary bootstrap restriction which required CPUv itself to be x64. Windows 11 ARM64 runs the existing verified x64 CMake/Ninja/Conan bootstrap tools through emulation; CPUv now permits that host and checks actual tool execution/version. Target applications are still compiled for ARM64 and executed by the native consumer fixture. This does not add an ARM64 self-update payload or prove x64 emulation on older Windows ARM images.
 
 `desktop-compatibility.yml` is a manual lab workflow for desktop Windows 10/11. Provision an isolated X64 runner with Rust, Git, PowerShell 7, Microsoft C++ Build Tools/SDK, network access for the verified bootstrap tools, and labels `cpuv-compatibility-lab` plus `cpuv-windows10` or `cpuv-windows11`. Reset the machine between runs. This workflow does not run pull requests on self-hosted machines. Merely adding it does not establish a desktop-image pass; preserve the exact image/build and evidence after execution.
 

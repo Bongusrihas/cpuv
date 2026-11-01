@@ -16,8 +16,8 @@ pub(super) async fn get(
     limits: &cpuv_fetch::Limits,
 ) -> Result<PathBuf> {
     ensure!(
-        cfg!(target_arch = "x86_64"),
-        "Automatic build-tool bootstrap currently needs x64 cpuv"
+        cfg!(any(target_arch = "x86_64", target_arch = "aarch64")),
+        "Pinned bootstrap tools require an x64 host or Windows ARM64 with x64 execution support"
     );
     let spec = registry
         .tools
@@ -134,7 +134,12 @@ pub async fn prepare(
 }
 
 fn verify_version(name: &str, spec: &Tool, executable: &Path) -> Result<()> {
-    let output = Command::new(executable).arg("--version").output()?;
+    // Windows 11 ARM64 can execute the verified x64 bootstrap tools through emulation.
+    // Test execution instead of assuming that CPUv and every build tool share an architecture.
+    let output = Command::new(executable)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("Running pinned {name}; these tools require x64 execution support (native x64 or Windows 11 ARM64 emulation)"))?;
     ensure!(
         output.status.success()
             && String::from_utf8_lossy(&output.stdout)

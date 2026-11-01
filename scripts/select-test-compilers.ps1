@@ -10,7 +10,9 @@ foreach ($architecture in $architectures) {
         $toolsets=Join-Path $installation 'VC/Tools/MSVC'
         if (-not (Test-Path -LiteralPath $toolsets -PathType Container)) {continue}
         foreach($toolset in Get-ChildItem -LiteralPath $toolsets -Directory) {
-            $hosts=if($env:PROCESSOR_ARCHITECTURE -eq 'ARM64'){@('Hostarm64','Hostx64')}else{@('Hostx64')}
+            # Native ARM coverage requires native-hosted tools. Emulated x64-hosted cross
+            # toolsets need a separate Conan build-host profile and are not this lane.
+            $hosts=if($env:PROCESSOR_ARCHITECTURE -eq 'ARM64'){@('Hostarm64')}else{@('Hostx64')}
             foreach($hostDirectory in $hosts) {
                 $compiler=Join-Path $toolset.FullName ("bin/$hostDirectory/$architecture/cl.exe")
                 if (Test-Path -LiteralPath $compiler -PathType Leaf) {
