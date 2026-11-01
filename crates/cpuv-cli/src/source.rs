@@ -404,7 +404,7 @@ fn configure_profile(
     );
     let cpp: Vec<_> = profile.cpp.iter().chain(&profile.cxx).cloned().collect();
     let cflags: Vec<_> = profile.cpp.iter().chain(&profile.c).cloned().collect();
-    let conf = BTreeMap::from([
+    let mut conf = BTreeMap::from([
         (
             "tools.build:compiler_executables",
             serde_json::json!({"c":cpuv_relocate::portable(c),"cpp":cpuv_relocate::portable(&tc.compiler_path)}),
@@ -431,6 +431,38 @@ fn configure_profile(
         ),
         ("user.cpuv:profile", serde_json::json!(key)),
     ]);
+    if tc.driver == "msvc" {
+        // Older toolsets can live inside newer IDEs. The compiler version cannot identify the IDE.
+        let installation = tc
+            .environment
+            .get("VSINSTALLDIR")
+            .context("Selected Microsoft environment has no Visual Studio installation")?;
+        let locator = PathBuf::from(
+            std::env::var_os("ProgramFiles(x86)").context("Missing Visual Studio locator root")?,
+        )
+        .join("Microsoft Visual Studio/Installer/vswhere.exe");
+        let output = Command::new(locator)
+            .args(["-path", installation, "-property", "installationVersion"])
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "Visual Studio installation lookup failed"
+        );
+        let version = String::from_utf8(output.stdout)?;
+        let version = version.trim();
+        ensure!(
+            !version.is_empty() && version.bytes().all(|c| c.is_ascii_digit() || c == b'.'),
+            "Selected Visual Studio installation did not report a valid version"
+        );
+        conf.insert(
+            "tools.microsoft.msbuild:installation_path",
+            serde_json::json!(cpuv_relocate::portable(Path::new(installation))),
+        );
+        conf.insert(
+            "tools.microsoft.msbuild:vs_version",
+            serde_json::json!(version.split('.').next().unwrap()),
+        );
+    }
     let runtime = if tc.driver == "msvc" {
         let runtime_version = if tc.abi.compiler_family == "clang" {
             format!(
