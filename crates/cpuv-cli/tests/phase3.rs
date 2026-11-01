@@ -39,6 +39,20 @@ impl Fixture {
         }
         let start = Instant::now();
         let output = command.output().unwrap();
+        if let Some(directory) = std::env::var_os("CPUV_PHASE3_EVIDENCE") {
+            fs::create_dir_all(&directory).unwrap();
+            let identity = blake3::hash(self.app.to_string_lossy().as_bytes()).to_hex();
+            fs::write(
+                Path::new(&directory)
+                    .join(format!("command-{identity}-{:02}.log", self.timings.len())),
+                format!(
+                    "{args:?}\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+            .unwrap();
+        }
         self.timings.push(json!({"operation":args.join(" "),"milliseconds":start.elapsed().as_secs_f64()*1000.0,"success":output.status.success()}));
         assert_eq!(
             output.status.success(),
@@ -186,11 +200,16 @@ add_test(NAME consumer_gui COMMAND consumer_gui)
     unavailable["source"]["input"]["url"] = json!(format!("{}/unavailable.zip", server.url));
     unavailable["source"]["input"]["sha256"] = json!("a".repeat(64));
     fs::write(&spec, toml::to_string_pretty(&unavailable).unwrap()).unwrap();
+    let requests_before_outage = server.requests.load(Ordering::SeqCst);
     let failed = f.invoke(
         &["source", "add", "matrix-fixture", spec.to_str().unwrap()],
         false,
     );
-    assert!(String::from_utf8_lossy(&failed.stderr).contains("503"));
+    assert!(
+        server.requests.load(Ordering::SeqCst) > requests_before_outage,
+        "The failed operation did not reach the unavailable provider: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
     assert_eq!(before, f.state());
     server.routes.lock().unwrap().clear();
     let requests = server.requests.load(Ordering::SeqCst);
