@@ -215,7 +215,12 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
             .find(|p| p.is_file())
             .context("Microsoft linker not found")?
     };
-    let runtime_version = runtime_toolset(&abi.stdlib_release)?;
+    let runtime_version = conan_toolset(
+        environment
+            .get("VCTOOLSINSTALLDIR")
+            .context("Missing selected Microsoft toolset directory")?,
+    )?
+    .0;
     let abi_hash = blake3::hash(&serde_json::to_vec(&abi)?).to_hex()[..32].to_owned();
     Ok(Toolchain {
         compiler_path: path.clone(),
@@ -241,22 +246,46 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
     })
 }
 
-// Compiler minor versions and MSBuild toolsets do not advance together (19.4x still uses v143).
-fn runtime_toolset(stl_release: &str) -> Result<String> {
+// Conan's clang runtime selector v144 means vcvars 14.4, although MSBuild still calls it v143.
+pub(crate) fn conan_toolset(directory: &str) -> Result<(String, String)> {
+    let version = Path::new(directory)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("Missing Microsoft toolset version directory")?;
+    let mut components = version.split('.');
+    let major = components.next().unwrap_or_default();
+    let minor = components.next().unwrap_or_default();
+    let patch = components.collect::<Vec<_>>().join(".");
     ensure!(
-        stl_release.len() == 3 && stl_release.bytes().all(|b| b.is_ascii_digit()),
-        "Invalid observed Microsoft STL toolset version"
+        major == "14"
+            && minor.len() == 2
+            && minor.bytes().all(|c| c.is_ascii_digit())
+            && !patch.is_empty()
+            && patch.bytes().all(|c| c.is_ascii_digit() || c == b'.'),
+        "Invalid selected Microsoft toolset directory version"
     );
-    Ok(format!("v{stl_release}"))
+    Ok((
+        format!("v{major}{}", &minor[..1]),
+        format!("{}.{patch}", &minor[1..]),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn toolset_uses_the_observed_stl_release_instead_of_compiler_minor_arithmetic() {
-        assert_eq!(runtime_toolset("143").unwrap(), "v143");
-        assert_eq!(runtime_toolset("145").unwrap(), "v145");
-        assert!(runtime_toolset("14.44").is_err());
+    fn conan_activation_tracks_the_exact_directory_not_the_msbuild_platform_name() {
+        for (version, runtime, update) in [
+            ("14.29.30159", "v142", "9.30159"),
+            ("14.38.33130", "v143", "8.33130"),
+            ("14.44.35207", "v144", "4.35207"),
+            ("14.51.36231", "v145", "1.36231"),
+        ] {
+            assert_eq!(
+                conan_toolset(&format!("VC/Tools/MSVC/{version}/")).unwrap(),
+                (runtime.into(), update.into())
+            );
+        }
+        assert!(conan_toolset("VC/Tools/MSVC/invalid").is_err());
     }
 }

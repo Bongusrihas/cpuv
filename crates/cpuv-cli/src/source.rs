@@ -462,6 +462,10 @@ fn configure_profile(
             "tools.microsoft.msbuild:vs_version",
             serde_json::json!(version.split('.').next().unwrap()),
         );
+        conf.insert(
+            "tools.microsoft:msvc_update",
+            serde_json::json!(cpuv_toolchain::microsoft_toolset(tc)?.1),
+        );
     }
     let runtime = if tc.driver == "msvc" {
         let runtime_version = if tc.abi.compiler_family == "clang" {

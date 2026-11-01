@@ -10,6 +10,15 @@ use std::{
 mod msvc;
 mod msys;
 
+/// Conan activation selector and update suffix for the selected Microsoft toolset directory.
+pub fn microsoft_toolset(tc: &Toolchain) -> Result<(String, String)> {
+    msvc::conan_toolset(
+        tc.environment
+            .get("VCTOOLSINSTALLDIR")
+            .context("Missing selected Microsoft toolset directory")?,
+    )
+}
+
 pub fn identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
     capture_identity(tc, false)
 }
