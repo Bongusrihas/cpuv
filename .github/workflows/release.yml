@@ -11,6 +11,10 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,6 +77,39 @@ jobs:
           name: phase2-evidence
           path: ${{ runner.temp }}/cpuv-phase2-evidence
           retention-days: 14
+      - name: Phase 3 release lifecycle and native consumer gate
+        shell: pwsh
+        run: |
+          $compilers=@(./scripts/select-test-compilers.ps1 -IncludeX86)
+          ./scripts/test-phase3.ps1 -ReleaseBuild -Compiler $compilers -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-phase3-evidence"
+      - name: Retain Phase 3 release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase3-evidence
+          path: ${{ runner.temp }}/cpuv-phase3-evidence
+          retention-days: 30
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Inventory and audit release inputs
+        shell: pwsh
+        run: |
+          cargo fetch --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) {throw 'Inventory source closure download failed'}
+          python scripts/inventory.py dist/cpuv-dependencies.cdx.json
+          if ($LASTEXITCODE -ne 0) {throw 'Dependency/license inventory failed'}
+          cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+          if ($LASTEXITCODE -ne 0) {throw 'Audit tool installation failed'}
+          cargo audit --file Cargo.lock --json | Set-Content -LiteralPath dist/cpuv-audit.json -Encoding utf8
+          if ($LASTEXITCODE -ne 0) {throw 'Release dependency audit failed'}
+      - name: Attest tested release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/cpuv-setup.exe
+            dist/cpuv-x86_64-pc-windows-msvc.zip
+            dist/cpuv-dependencies.cdx.json
       - uses: actions/upload-artifact@v4
         with:
           name: cpuv-windows-release

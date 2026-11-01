@@ -4,6 +4,8 @@ Version **0.0.4** targets native Windows C/C++ workflows. Compiler, runtime, SDK
 
 For the unreleased Phase 2 changes and their reproducible gate, see [Phase 2](phase2.md). The table below records released 0.0.4 evidence; it is not evidence that the new source has already passed remote CI.
 
+For the new compiler/image/consumer matrix, native ARM64 job, desktop lab workflow and measured verification boundary, see [Phase 3](phase3.md). Only completed jobs and retained evidence establish acceptance for those lanes.
+
 ## Application platform
 
 The prebuilt cpuv executable targets Windows 10 or newer on x86-64 and statically links its Microsoft C runtime. It needs no Rust/Cargo or separate Visual C++ runtime installation. Building cpuv requires Rust and its platform tools. Compiling applications requires a working selected compiler. MSYS2 compiler installation uses an existing pacman host; cpuv does not bootstrap MSYS2. The vcpkg adapter requires Git and Microsoft C++ Build Tools and bootstraps provider-declared tools into its cache.

@@ -1,0 +1,14 @@
+{
+  "cmake": {
+    "license": "BSD-3-Clause",
+    "url": "https://github.com/Kitware/CMake/blob/v3.31.6/Copyright.txt"
+  },
+  "ninja": {
+    "license": "Apache-2.0",
+    "url": "https://github.com/ninja-build/ninja/blob/v1.12.1/COPYING"
+  },
+  "conan": {
+    "license": "MIT",
+    "url": "https://github.com/conan-io/conan/blob/2.33.0/LICENSE.md"
+  }
+}

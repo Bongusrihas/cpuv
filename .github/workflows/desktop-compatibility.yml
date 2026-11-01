@@ -1,0 +1,31 @@
+name: Desktop Windows compatibility lab
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Isolated desktop lab image label
+        type: choice
+        required: true
+        options: [cpuv-windows10, cpuv-windows11]
+permissions:
+  contents: read
+jobs:
+  desktop:
+    # Deliberately manual: self-hosted desktop machines never execute pull request code.
+    runs-on: [self-hosted, Windows, X64, cpuv-compatibility-lab, '${{ inputs.image }}']
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native desktop acceptance
+        shell: pwsh
+        run: |
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) {throw 'Workspace tests failed'}
+          $compilers=@(./scripts/select-test-compilers.ps1 -IncludeX86)
+          ./scripts/test-phase3.ps1 -Compiler $compilers -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-desktop-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-evidence-${{ inputs.image }}
+          path: ${{ runner.temp }}/cpuv-desktop-evidence
+          retention-days: 30

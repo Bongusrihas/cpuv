@@ -29,7 +29,7 @@ walkdir.workspace = true
 tar.workspace = true
 flate2.workspace = true
 zstd.workspace = true
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 self-replace = "1.5"
 cpuv-toolchain.workspace = true
 cpuv-solver.workspace = true

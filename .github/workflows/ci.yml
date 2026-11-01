@@ -10,6 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  minimum-rust:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-1.88
+      - name: Check the declared minimum Rust version
+        shell: pwsh
+        run: |
+          cargo check --workspace --all-targets --locked
+          if ($LASTEXITCODE -ne 0) {throw 'The declared Rust 1.88 minimum is no longer satisfied'}
   build:
     runs-on: windows-latest
     steps:
@@ -62,6 +75,47 @@ jobs:
           name: phase1-evidence
           path: ${{ runner.temp }}/cpuv-phase1-evidence
           retention-days: 14
+
+  phase3:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: phase3-${{ matrix.os }}
+      - name: Validate and exercise installed historical/current toolsets
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) {throw 'Formatting failed'}
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) {throw 'Clippy failed'}
+          $compilers=@(./scripts/select-test-compilers.ps1 -IncludeX86)
+          ./scripts/test-phase3.ps1 -Compiler $compilers -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-phase3-evidence"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Record dependencies and bootstrap provenance
+        shell: pwsh
+        run: |
+          cargo fetch --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) {throw 'Inventory source closure download failed'}
+          python scripts/inventory.py "$env:RUNNER_TEMP/cpuv-phase3-evidence/dependencies.cdx.json"
+          if ($LASTEXITCODE -ne 0) {throw 'Dependency/license inventory failed'}
+      - name: Retain Phase 3 compatibility and timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase3-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/cpuv-phase3-evidence
+          retention-days: 30
 
   phase2:
     strategy:

@@ -8,6 +8,8 @@ cpuv manages native C++ dependencies, prepares a project environment, and compil
 
 The source tree also contains the **unreleased Phase 2** source-package, compiler provisioning, build-adapter, runtime, offline-transfer and cache-management work. See the [Phase 2 guide and acceptance gate](docs/phase2.md). Published 0.0.4 downloads retain their released behavior until a new release is built and published.
 
+The [Phase 3 guide](docs/phase3.md) covers the expanded native consumer/lifecycle matrix, dependency audits and license inventory, release provenance, performance evidence, and desktop/ARM64 verification boundaries.
+
 ## Highlights
 
 - Parallel package downloads, with a configurable limit of 50 transfers by default.
