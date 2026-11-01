@@ -2,7 +2,31 @@
 use super::*;
 use std::collections::BTreeSet;
 mod archive;
-mod tools;
+pub mod managed;
+pub mod native;
+pub(crate) mod tools;
+
+/// Collection requires a complete CPUv receipt, never just a hash-shaped directory name.
+pub(crate) fn verify_cache_object(path: &Path, source_input: bool) -> Result<()> {
+    let (receipt, contents) = if source_input {
+        ("source-files.json", "src")
+    } else {
+        ("files.json", "prefix")
+    };
+    cpuv_core::contained(path, Path::new(receipt))?;
+    cpuv_core::regular(&path.join(receipt))?;
+    cpuv_core::contained(path, Path::new(contents))?;
+    let files: BTreeMap<String, String> = serde_json::from_slice(&fs::read(path.join(receipt))?)?;
+    ensure!(
+        !files.is_empty()
+            && files
+                .values()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+        "Invalid CPUv cache receipt"
+    );
+    archive::verify(&path.join(contents), &files)
+}
+
 pub async fn build_tools(cli: &Cli) -> Result<(PathBuf, PathBuf)> {
     let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
     tools::build_tools(
@@ -29,7 +53,7 @@ fn one() -> usize {
     1
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Tool {
+pub(crate) struct Tool {
     version: String,
     #[serde(flatten)]
     source: Archive,
@@ -39,8 +63,8 @@ struct Tool {
     conan_package: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-struct Registry {
-    tools: BTreeMap<String, Tool>,
+pub(crate) struct Registry {
+    pub(crate) tools: BTreeMap<String, Tool>,
 }
 pub fn custom_profile_requested() -> bool {
     ["CPPFLAGS", "CFLAGS", "CXXFLAGS", "LDFLAGS"]
@@ -190,6 +214,8 @@ impl Profile {
 #[derive(Serialize, Deserialize)]
 struct CatalogLock {
     version: u32,
+    #[serde(default = "identity_schema_legacy")]
+    identity_schema: u32,
     backend: String,
     dependencies: BTreeMap<String, Dependency>,
     profile: Profile,
@@ -200,7 +226,7 @@ struct CatalogLock {
 }
 
 pub fn requests_locked(root: &Path, manifest: &Manifest, requests: &[String]) -> bool {
-    let locked: Option<CatalogLock> = fs::read_to_string(root.join("cpuv.lock"))
+    let locked: Option<CatalogLock> = cpuv_core::locks::read(&root.join("cpuv.lock"))
         .ok()
         .and_then(|text| toml::from_str(&text).ok());
     locked.is_some_and(|lock| {
@@ -258,6 +284,15 @@ fn standard(tc: &Toolchain) -> Result<String> {
 }
 
 fn reference(name: &str, dependency: &Dependency) -> Result<String> {
+    if matches!(
+        dependency,
+        Dependency::Detailed {
+            source: Some(_),
+            ..
+        }
+    ) {
+        return native::reference(name, dependency);
+    }
     if let Dependency::Detailed {
         reference: Some(value),
         ..
@@ -299,10 +334,15 @@ fn reference(name: &str, dependency: &Dependency) -> Result<String> {
     ))
 }
 
+fn identity_schema_legacy() -> u32 {
+    1
+}
+
 fn command(executable: &Path, home: &Path, path: &std::ffi::OsStr) -> Command {
     let mut value = Command::new(executable);
     value
         .env("CONAN_HOME", home)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PATH", path)
         .env_remove("CC")
         .env_remove("CXX");
@@ -310,14 +350,8 @@ fn command(executable: &Path, home: &Path, path: &std::ffi::OsStr) -> Command {
 }
 
 fn run(command: &mut Command, log: &Path) -> Result<()> {
-    use std::io::Write;
-    let mut out = OpenOptions::new().create(true).append(true).open(log)?;
-    writeln!(out, "command: {command:?}")?;
-    let status = command
-        .stdout(out.try_clone()?)
-        .stderr(out)
-        .status()
-        .context("Starting the community package provider")?;
+    let status =
+        cpuv_core::process::run(command, log, &cpuv_core::process::Limits::environment()?)?;
     if !status.success() {
         let text = fs::read_to_string(log)?;
         let tail = text
@@ -398,8 +432,18 @@ fn configure_profile(
         ("user.cpuv:profile", serde_json::json!(key)),
     ]);
     let runtime = if tc.driver == "msvc" {
+        let runtime_version = if tc.abi.compiler_family == "clang" {
+            format!(
+                "compiler.runtime_version={}\n",
+                tc.observed_abi_options
+                    .get("msvc_runtime_version")
+                    .context("Missing MSVC runtime toolset observation")?
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "compiler.runtime=dynamic\ncompiler.runtime_type={}\n",
+            "compiler.runtime=dynamic\ncompiler.runtime_type={}\n{runtime_version}",
             profile.configuration
         )
     } else {
@@ -434,7 +478,13 @@ fn configure_profile(
     }
     if !tc.environment.is_empty() {
         output.push_str("[buildenv]\n");
-        for name in ["INCLUDE", "LIB", "LIBPATH"] {
+        for name in [
+            "INCLUDE",
+            "LIB",
+            "LIBPATH",
+            "VCTOOLSINSTALLDIR",
+            "WINDOWSSDKVERSION",
+        ] {
             if let Some(value) = tc.environment.get(name) {
                 ensure!(
                     !value.contains(['\n', '\r']),
@@ -499,15 +549,29 @@ fn configure_build_profile(
     native: Option<&Toolchain>,
     jobs: usize,
     tools: &[String],
+    identity_schema: u32,
 ) -> Result<String> {
     if let Some(tc) = native {
-        let key = blake3::hash(&serde_json::to_vec(&(
-            tc,
-            archive::digest(&tc.compiler_path)?,
-            tools,
-        ))?)
-        .to_hex()
-        .to_string();
+        let key = if identity_schema == 1 {
+            blake3::hash(&serde_json::to_vec(&(
+                tc,
+                archive::digest(&tc.compiler_path)?,
+                tools,
+            ))?)
+            .to_hex()
+            .to_string()
+        } else {
+            blake3::hash(&serde_json::to_vec(&(
+                2,
+                &tc.abi,
+                &tc.gcc_version,
+                &tc.driver,
+                cpuv_toolchain::identity(tc)?.portable_digest()?,
+                tools,
+            ))?)
+            .to_hex()
+            .to_string()
+        };
         configure_profile(tc, &Profile::default(), &key, jobs, tools)
     } else {
         let mut output = format!(
@@ -782,6 +846,8 @@ async fn prepare_context(
     base_tc: &Toolchain,
     profile: &Profile,
     standard: &str,
+    identity_schema: u32,
+    artifacts: &BTreeMap<String, managed::Artifact>,
 ) -> Result<CatalogContext> {
     if base_tc.driver == "msvc" {
         let expected = if profile.configuration == "Debug" {
@@ -807,12 +873,32 @@ async fn prepare_context(
     let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
     let base = cache_dir(cli)?.join("catalog");
     fs::create_dir_all(&base)?;
-    let identity = cpuv_toolchain::identity(&tc)?;
-    let key = blake3::hash(&serde_json::to_vec(&(
-        1, &tc, &profile, standard, &identity,
-    ))?)
-    .to_hex()
-    .to_string();
+    let identity = if identity_schema == 1 {
+        cpuv_toolchain::legacy_identity(&tc)?
+    } else {
+        cpuv_toolchain::identity(&tc)?
+    };
+    let key = if identity_schema == 1 {
+        blake3::hash(&serde_json::to_vec(&(
+            1, &tc, &profile, standard, &identity,
+        ))?)
+        .to_hex()
+        .to_string()
+    } else {
+        ensure!(identity_schema == 2, "Unsupported compiler identity schema");
+        blake3::hash(&serde_json::to_vec(&(
+            2,
+            &tc.abi,
+            &tc.gcc_version,
+            &tc.driver,
+            &profile,
+            standard,
+            identity.portable_digest()?,
+            artifacts,
+        ))?)
+        .to_hex()
+        .to_string()
+    };
     let home = base.join("homes").join(&key);
     fs::create_dir_all(&home)?;
     let guard = OpenOptions::new()
@@ -824,13 +910,108 @@ async fn prepare_context(
     guard.try_lock_exclusive().context(
         "Another catalog operation is using this compiler/profile; retry when it finishes",
     )?;
-    let tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
+    let mut tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
+    let mut declared_bins = Vec::new();
+    let mut declared_tools = BTreeMap::new();
+    for (name, artifact) in artifacts {
+        ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+            "Invalid build-tool name"
+        );
+        let executable = managed::tool(name, artifact, cli).await?;
+        declared_bins.push(
+            executable
+                .parent()
+                .context("Tool has no parent")?
+                .to_owned(),
+        );
+        if name == "cmake" {
+            tools.cmake = executable.clone();
+        }
+        if name == "ninja" {
+            tools.ninja = executable.clone();
+        }
+        declared_tools.insert(name.clone(), executable);
+    }
+    let launchers = home.join("launchers");
+    fs::create_dir_all(&launchers)?;
+    for (name, artifact) in artifacts {
+        if let Some(interpreter) = &artifact.interpreter {
+            let interpreter = declared_tools
+                .get(interpreter)
+                .context("Declare the tool interpreter as a pinned [tools] entry")?;
+            let executable = &declared_tools[name];
+            ensure!(
+                !interpreter.to_string_lossy().contains(['%', '\r', '\n'])
+                    && !executable.to_string_lossy().contains(['%', '\r', '\n']),
+                "Unsupported command-launcher path"
+            );
+            fs::write(
+                launchers.join(format!("{name}.cmd")),
+                format!(
+                    "@echo off\r\n\"{}\" \"{}\" %*\r\n",
+                    interpreter.display(),
+                    executable.display()
+                ),
+            )?;
+        }
+    }
+    for (name, artifact) in artifacts {
+        tools
+            .platform_references
+            .retain(|reference| !reference.starts_with(&format!("{name}/")));
+        if let Some(package) = &artifact.conan_package {
+            let executable = &declared_tools[name];
+            let mut version = if let Some(interpreter) = &artifact.interpreter {
+                let mut command = Command::new(&declared_tools[interpreter]);
+                command.arg(executable);
+                command
+            } else {
+                Command::new(executable)
+            };
+            version.env("PYTHONDONTWRITEBYTECODE", "1");
+            if artifact.version_arguments.is_empty() {
+                version.arg("--version");
+            } else {
+                version.args(&artifact.version_arguments);
+            }
+            let log = base.join("logs").join(format!(
+                "version-{name}-{}.log",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos()
+            ));
+            let mut limits = cpuv_core::process::Limits::environment()?;
+            limits.timeout = std::time::Duration::from_secs(30);
+            ensure!(
+                cpuv_core::process::run(&mut version, &log, &limits)?.success(),
+                "Build tool version check failed"
+            );
+            ensure!(
+                fs::read_to_string(log)?
+                    .lines()
+                    .skip(1)
+                    .flat_map(str::split_whitespace)
+                    .any(|v| v == artifact.version),
+                "Build tool {name} did not report declared version {}",
+                artifact.version
+            );
+            let reference = format!("{package}/{}", artifact.version);
+            reference_name(&reference)?;
+            tools.platform_references.push(reference);
+        }
+    }
     let native = native_build_compiler(cli, base_tc)?;
     let mut paths = vec![
+        launchers,
         tools.cmake.parent().unwrap().to_owned(),
         tools.ninja.parent().unwrap().to_owned(),
-        tc.compiler_path.parent().unwrap().to_owned(),
     ];
+    paths.extend(declared_bins);
+    paths.push(tc.compiler_path.parent().unwrap().to_owned());
     if let Some(host) = cpuv_relocate::msys_host_bin(tc.compiler_path.parent().unwrap()) {
         paths.push(host);
     }
@@ -855,7 +1036,12 @@ async fn prepare_context(
     )?;
     fs::write(
         &build_profile_path,
-        configure_build_profile(native.as_ref(), jobs, &tools.platform_references)?,
+        configure_build_profile(
+            native.as_ref(),
+            jobs,
+            &tools.platform_references,
+            identity_schema,
+        )?,
     )?;
     if native.is_none() {
         eprintln!(
@@ -889,9 +1075,11 @@ pub async fn execute(root: &Path, cli: &Cli, arguments: &[OsString]) -> Result<i
     struct Saved {
         #[serde(default)]
         profile: Profile,
+        #[serde(default = "identity_schema_legacy")]
+        identity_schema: u32,
     }
     let saved: Saved = if root.join("cpuv.lock").is_file() {
-        toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)?
+        toml::from_str(&cpuv_core::locks::read(&root.join("cpuv.lock"))?)?
     } else {
         Saved::default()
     };
@@ -905,7 +1093,19 @@ pub async fn execute(root: &Path, cli: &Cli, arguments: &[OsString]) -> Result<i
             .map(|m| m.project.configuration)
             .unwrap_or_else(|_| release_configuration())
     });
-    let context = prepare_context(cli, &tc, &profile, &standard).await?;
+    let context = prepare_context(
+        cli,
+        &tc,
+        &profile,
+        &standard,
+        if saved.identity_schema == 0 {
+            2
+        } else {
+            saved.identity_schema
+        },
+        &read_manifest(root).map(|m| m.tools).unwrap_or_default(),
+    )
+    .await?;
     let profiles = context.home.join("profiles");
     fs::create_dir_all(&profiles)?;
     write_atomic(&profiles.join("default"), &fs::read(&context.profile_path)?)?;
@@ -977,7 +1177,7 @@ pub async fn sync(
     refresh: bool,
 ) -> Result<()> {
     let started = Instant::now();
-    let old_text = match fs::read_to_string(root.join("cpuv.lock")) {
+    let old_text = match cpuv_core::locks::read(&root.join("cpuv.lock")) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("Reading cpuv.lock"),
@@ -1033,7 +1233,19 @@ pub async fn sync(
         build_profile_path,
         key,
         _guard,
-    } = prepare_context(cli, base_tc, &profile, &manifest.project.std).await?;
+    } = prepare_context(
+        cli,
+        base_tc,
+        &profile,
+        &manifest.project.std,
+        if refresh {
+            2
+        } else {
+            old.as_ref().map_or(2, |lock| lock.identity_schema)
+        },
+        &manifest.tools,
+    )
+    .await?;
     let stage = tempfile::Builder::new()
         .prefix("stage-catalog-")
         .tempdir_in(root.join(".cpuv"))?;
@@ -1068,6 +1280,20 @@ pub async fn sync(
         std::process::id(),
         started.elapsed().as_nanos()
     ));
+    native::prepare(
+        root,
+        cli,
+        manifest,
+        &tc,
+        &native::RecipeContext {
+            base: &base,
+            home: &home,
+            path: &path,
+            conan: &tools.conan,
+            log: &log,
+        },
+    )
+    .await?;
     let mut install = command(&tools.conan, &home, &path);
     install.envs(&tc.environment).env("PATH", &path);
     // Validate provider manifests before executing cached recipes or deploying
@@ -1183,15 +1409,30 @@ pub async fn sync(
         &graph,
         &identity,
     )?;
+    if !refresh {
+        ensure!(
+            versions == old.as_ref().unwrap().packages,
+            "Provider restored a different locked package graph"
+        );
+    }
     let locked = CatalogLock {
         version: 3,
+        identity_schema: if refresh {
+            2
+        } else {
+            old.as_ref().map_or(2, |lock| lock.identity_schema)
+        },
         backend: "conan".into(),
         dependencies: manifest.dependencies.clone(),
         profile,
         gcc_version: tc.gcc_version.clone(),
         abi: tc.abi.clone(),
         packages: versions,
-        upstream_lock: fs::read_to_string(upstream_lock)?,
+        upstream_lock: if use_lock {
+            old.as_ref().unwrap().upstream_lock.clone()
+        } else {
+            fs::read_to_string(upstream_lock)?
+        },
     };
     fs::write(
         env.join("catalog-profile.json"),
@@ -1217,9 +1458,11 @@ pub async fn sync(
         stage.path().join("cpuv.toml"),
         toml::to_string_pretty(&manifest)?,
     )?;
-    fs::write(
-        stage.path().join("cpuv.lock"),
-        toml::to_string_pretty(&locked)?,
+    cpuv_core::locks::write(
+        root,
+        &stage.path().join("cpuv.lock"),
+        &toml::to_string_pretty(&locked)?,
+        &request_hash(&manifest)?,
     )?;
     fs::write(
         stage.path().join("toolchain.json"),
@@ -1227,6 +1470,7 @@ pub async fn sync(
     )?;
     fs::write(stage.path().join("activate.ps1"), activation(root, &tc)?)?;
     stage_auxiliary(stage.path(), root, &tc)?;
+    artifacts::store(root, cli, &toml::to_string_pretty(&locked)?, &env, &tc)?;
     commit(root, stage)?;
     if let Err(error) = write_atomic(
         &root.join(".cpuv/last-sync.json"),
@@ -1244,7 +1488,7 @@ pub async fn sync(
 }
 
 pub fn info(root: &Path) -> Result<()> {
-    let lock: CatalogLock = toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)
+    let lock: CatalogLock = toml::from_str(&cpuv_core::locks::read(&root.join("cpuv.lock"))?)
         .context("Legacy source lock; run cpuv sync to migrate to the community catalog")?;
     println!(
         "Backend: Conan (configured remotes and local recipes)\nCompiler recorded by lock: GCC {}",
@@ -1271,6 +1515,107 @@ fn commit(root: &Path, stage: tempfile::TempDir) -> Result<()> {
     )
 }
 
+/// Export/import through Conan's public cache API; never copy home databases or credentials.
+pub async fn offline_transfer(
+    root: &Path,
+    cli: &Cli,
+    directory: &Path,
+    restore: bool,
+) -> Result<()> {
+    let manifest = read_manifest(root)?;
+    if manifest.backend != Backend::Conan {
+        return Ok(());
+    }
+    let lock: CatalogLock = toml::from_str(&cpuv_core::locks::read(&root.join("cpuv.lock"))?)?;
+    let selected: Toolchain =
+        serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
+    let tc = cpuv_toolchain::probe(Some(&selected.compiler_path))?;
+    let context = prepare_context(
+        cli,
+        &tc,
+        &lock.profile,
+        &manifest.project.std,
+        lock.identity_schema,
+        &manifest.tools,
+    )
+    .await?;
+    let temporary_log = tempfile::NamedTempFile::new()?;
+    let log = temporary_log.path().to_owned();
+    let archive = directory.join("conan-cache.tgz");
+    if restore {
+        run(
+            command(&context.tools.conan, &context.home, &context.path)
+                .args(["cache", "restore"])
+                .arg(&archive),
+            &log,
+        )?;
+    } else {
+        let graph: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(".cpuv/env/catalog-profile.json"))?)?;
+        fs::write(
+            directory.join("graph.json"),
+            serde_json::to_vec(&graph["graph"])?,
+        )?;
+        run(
+            command(&context.tools.conan, &context.home, &context.path)
+                .args(["list", "--graph"])
+                .arg(directory.join("graph.json"))
+                .args(["--format=json", "--out-file"])
+                .arg(directory.join("packages.json")),
+            &log,
+        )?;
+        run(
+            command(&context.tools.conan, &context.home, &context.path)
+                .args(["cache", "save", "--list"])
+                .arg(directory.join("packages.json"))
+                .arg("--file")
+                .arg(&archive),
+            &log,
+        )?;
+    }
+    Ok(())
+}
+
+pub async fn search(root: &Path, cli: &Cli, query: &str) -> Result<()> {
+    let _lease = project_lock(root)?;
+    let tc = cpuv_toolchain::probe(cli.compiler.as_deref())?;
+    let manifest = read_manifest(root).ok();
+    let saved = cpuv_core::locks::read(&root.join("cpuv.lock"))
+        .ok()
+        .and_then(|text| toml::from_str::<CatalogLock>(&text).ok());
+    let mut profile = saved
+        .as_ref()
+        .map(|lock| lock.profile.clone())
+        .unwrap_or_default();
+    if let Some(manifest) = &manifest {
+        profile.configuration = manifest.project.configuration.clone();
+    }
+    let standard = manifest
+        .as_ref()
+        .map(|m| m.project.std.clone())
+        .unwrap_or(standard(&tc)?);
+    let context = prepare_context(
+        cli,
+        &tc,
+        &profile,
+        &standard,
+        saved.as_ref().map_or(2, |lock| lock.identity_schema),
+        &manifest.map(|m| m.tools).unwrap_or_default(),
+    )
+    .await?;
+    let pattern = format!("{query}/*");
+    let log = context
+        .base
+        .join("logs")
+        .join(format!("search-{}.log", std::process::id()));
+    let mut search = command(&context.tools.conan, &context.home, &context.path);
+    search.args(["list", &pattern, "--format=json"]);
+    if !cli.offline {
+        search.args(["--remote=conancenter"]);
+    }
+    run(&mut search, &log)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,6 +1625,7 @@ mod tests {
             linkage: Some(linkage.into()),
             reference: None,
             options: BTreeMap::new(),
+            source: None,
         }
     }
     #[test]

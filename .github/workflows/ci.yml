@@ -62,3 +62,44 @@ jobs:
           name: phase1-evidence
           path: ${{ runner.temp }}/cpuv-phase1-evidence
           retention-days: 14
+
+  phase2:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: phase2-${{ matrix.os }}
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-clang-x86_64-clang
+      - name: Complete Phase 2 acceptance gate
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $compiler = Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/g++.exe'
+          $clang = Join-Path $env:MSYS2_LOCATION 'clang64/bin/clang++.exe'
+          ./scripts/test-phase2.ps1 -Compiler $compiler -AdditionalCompiler @($clang) -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-phase2-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Phase 2 acceptance gate failed' }
+      - name: Retain Phase 2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/cpuv-phase2-evidence
+          retention-days: 14

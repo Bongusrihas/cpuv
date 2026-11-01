@@ -3,7 +3,15 @@ use super::*;
 
 #[derive(Subcommand)]
 pub enum Action {
-    /// List discovered GCC installations and their observed ABI/provider.
+    /// Compile/link/run capability probes for the selected driver, linker and LTO.
+    Capabilities,
+    /// Provision a side-by-side compiler from a versioned, checksum-verified archive manifest.
+    Provision {
+        manifest: PathBuf,
+        #[arg(long = "use")]
+        select: bool,
+    },
+    /// List discovered native compilers and their observed ABI/provider.
     List,
     /// Install GCC and its upstream dependencies using an existing MSYS2 host.
     Install {
@@ -29,7 +37,7 @@ pub enum Action {
     Reset,
 }
 
-fn select(compiler: &Path) -> Result<()> {
+pub(crate) fn select(compiler: &Path) -> Result<()> {
     let tc = cpuv_toolchain::probe(Some(compiler))?;
     cpuv_toolchain::doctor(&tc, &[])?;
     let file = cpuv_toolchain::selection_file()?;
@@ -39,7 +47,7 @@ fn select(compiler: &Path) -> Result<()> {
         &serde_json::to_vec_pretty(&serde_json::json!({"compiler":tc.compiler_path}))?,
     )?;
     println!(
-        "Selected GCC {}: {} ({})",
+        "Selected compiler {}: {} ({})",
         tc.gcc_version,
         tc.compiler_path.display(),
         tc.runtime_tag()
@@ -50,8 +58,18 @@ fn select(compiler: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn execute(action: &Action, cli: &Cli) -> Result<i32> {
+pub async fn execute(action: &Action, cli: &Cli) -> Result<i32> {
     match action {
+        Action::Capabilities => {
+            let tc = cpuv_toolchain::probe(cli.compiler.as_deref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cpuv_toolchain::capabilities(&tc)?)?
+            );
+        }
+        Action::Provision { manifest, select } => {
+            source::managed::compiler(manifest, cli, *select).await?;
+        }
         Action::List => {
             let compilers = cpuv_toolchain::installed()?;
             println!(

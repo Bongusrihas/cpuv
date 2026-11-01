@@ -7,7 +7,7 @@ pub struct Tools {
     pub platform_references: Vec<String>,
 }
 
-async fn get(
+pub(super) async fn get(
     name: &str,
     minimum: &str,
     registry: &Registry,
@@ -31,12 +31,35 @@ async fn get(
     let key = blake3::hash(&serde_json::to_vec(spec)?)
         .to_hex()
         .to_string();
+    fs::create_dir_all(cache.join("tools"))?;
+    let guard = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(cache.join("tools").join(format!("{key}.lock")))?;
+    guard.lock_exclusive()?;
+    cpuv_core::contained(cache, &PathBuf::from("tools").join(&key))?;
     let directory = cache.join("tools").join(&key);
     let manifest = directory.join("files.json");
     if manifest.is_file() {
         let files: BTreeMap<String, String> = serde_json::from_slice(&fs::read(manifest)?)?;
-        archive::verify(&directory.join("prefix"), &files)?;
-        return Ok(directory.join("prefix").join(executable));
+        if archive::verify(&directory.join("prefix"), &files).is_ok() {
+            return Ok(directory.join("prefix").join(executable));
+        }
+        let quarantine = cache.join("quarantine/tools");
+        fs::create_dir_all(&quarantine)?;
+        let target = quarantine.join(format!(
+            "{key}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::rename(&directory, &target)?;
+        eprintln!(
+            "Preserved changed tool contents at {}; restoring its verified archive",
+            target.display()
+        );
     }
     let downloaded =
         archive::download(&cache.join("archives"), &spec.source, offline, limits).await?;

@@ -303,6 +303,10 @@ fn runtime_path(root: &Path, env: &Path, metadata: &Environment) -> Result<OsStr
         env.join("bin"),
         metadata.compiler_bin.clone(),
     ];
+    if let Some(plan) = super::read_manifest(root)?.runtime {
+        let source = super::profiles::project_root(root)?;
+        paths.extend(plan.search_paths.iter().map(|p| source.join(p)));
+    }
     if let Some(host) = cpuv_relocate::msys_host_bin(&metadata.compiler_bin) {
         paths.push(host);
     }
@@ -520,6 +524,8 @@ pub fn run(root: &Path, args: &[OsString], no_run: bool) -> Result<i32> {
     super::maintenance::validate_request(root, &metadata)?;
     metadata.tool_identity.verify()?;
     let path = runtime_path(root, &env, &metadata)?;
+    let runtime = manifest.runtime.unwrap_or_default();
+    let runtime_variables = runtime.variables(&source_root, &path)?;
     if !compiler_command(&args[0]) {
         let mut program = PathBuf::from(&args[0]);
         if source_root.join(&program).is_file() {
@@ -538,7 +544,8 @@ pub fn run(root: &Path, args: &[OsString], no_run: bool) -> Result<i32> {
                 .args(&args[1..])
                 .current_dir(&source_root)
                 .env("PATH", path)
-                .env("CPUV_ENV", env),
+                .env("CPUV_ENV", env)
+                .envs(&runtime_variables),
         );
     }
     fs::create_dir_all(build.join("tmp"))?;
@@ -591,7 +598,8 @@ pub fn run(root: &Path, args: &[OsString], no_run: bool) -> Result<i32> {
                     .args(plan.program_args)
                     .current_dir(&source_root)
                     .env("PATH", path)
-                    .env("CPUV_ENV", env),
+                    .env("CPUV_ENV", env)
+                    .envs(&runtime_variables),
             );
         }
     }

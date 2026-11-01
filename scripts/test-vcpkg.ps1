@@ -32,6 +32,11 @@ Invoke-Cpuv test
 $lockBefore = (Get-FileHash -LiteralPath (Join-Path $fixture 'cpuv.lock') -Algorithm SHA256).Hash
 Invoke-Cpuv sync
 Invoke-Cpuv --offline sync
+# Simulate a missing installed tree; retain it in the owned fixture for diagnosis.
+Move-Item -LiteralPath (Join-Path $fixture ".cpuv/env") -Destination (Join-Path $fixture ".cpuv/retained-env")
+Invoke-Cpuv --offline sync
+Invoke-Cpuv verify
+Invoke-Cpuv test
 $lockAfter = (Get-FileHash -LiteralPath (Join-Path $fixture 'cpuv.lock') -Algorithm SHA256).Hash
 if ($lockBefore -ne $lockAfter) { throw 'Locked restore changed the graph' }
 Invoke-Cpuv verify

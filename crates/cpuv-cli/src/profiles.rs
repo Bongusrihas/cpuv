@@ -97,6 +97,11 @@ pub fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
                     .unwrap_or_else(release_configuration);
                 manifest.dependencies = original.dependencies;
                 manifest.link = original.link;
+                manifest.tools = original.tools;
+                manifest.build = original.build;
+                manifest.runtime = original.runtime;
+                manifest.backend = original.backend;
+                manifest.vcpkg = original.vcpkg;
                 let env = stage.path().join(".cpuv/env");
                 let mut metadata: cpuv_relocate::Environment =
                     serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;

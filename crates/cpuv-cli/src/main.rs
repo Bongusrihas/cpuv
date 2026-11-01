@@ -16,12 +16,17 @@ use std::{
     time::Instant,
 };
 
+mod artifacts;
 mod build;
+mod cache;
 mod host_tools;
 mod install;
 mod maintenance;
+mod offline;
 mod profiles;
 mod runner;
+mod runtime;
+mod search;
 mod source;
 mod toolchains;
 mod uninstall;
@@ -32,7 +37,7 @@ mod vcpkg;
 #[command(
     name = "cpuv",
     version,
-    about = "C++ packages and clean compile-and-run workflows for Windows GCC"
+    about = "C++ packages, builds and compile-and-run workflows for Windows"
 )]
 struct Cli {
     #[arg(short = 'C', long = "project", global = true, default_value = ".")]
@@ -73,7 +78,7 @@ struct Cli {
     /// Choose the provider for the entire dependency graph.
     #[arg(long, global = true, value_parser = ["auto", "conan", "vcpkg"])]
     provider: Option<String>,
-    /// Native GCC used for compiling build tools, independently of the target GCC.
+    /// Native compiler for build tools, independently of the target compiler.
     #[arg(long, global = true, env = "CPUV_BUILD_CXX")]
     build_compiler: Option<PathBuf>,
     /// Build catalog packages from source with the selected GCC.
@@ -112,12 +117,38 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Search one upstream catalog; use exact provider names in dependency declarations.
+    Search {
+        #[arg(long, value_parser=["msys2","conan","vcpkg"])]
+        catalog: String,
+        query: String,
+    },
+    /// Transfer and verify locked development environments for offline use.
+    Offline {
+        #[command(subcommand)]
+        command: offline::Action,
+    },
+    /// Inspect CPUv-owned cache storage and safely prune unused objects.
+    Cache {
+        #[command(subcommand)]
+        command: cache::Action,
+    },
     /// Export an executable and its verified runtime closure to a new directory.
     Bundle {
         binary: PathBuf,
         destination: PathBuf,
         #[arg(long = "asset")]
         assets: Vec<PathBuf>,
+    },
+    /// List or restore verified immutable environment generations.
+    Generation {
+        #[command(subcommand)]
+        command: GenerationAction,
+    },
+    /// Inspect or add immutable archive, Git, local or SDK source declarations.
+    Source {
+        #[command(subcommand)]
+        command: source::native::Action,
     },
     /// Check every environment and toolchain file against its saved digest.
     Verify,
@@ -128,12 +159,12 @@ enum Action {
         #[command(subcommand)]
         command: profiles::Action,
     },
-    /// Configure and build a CMake project with the selected environment.
+    /// Build the project with its selected build system and environment.
     Build {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<OsString>,
     },
-    /// Build a CMake project and execute its CTest suite.
+    /// Build the project and run its declared tests.
     Test {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<OsString>,
@@ -202,6 +233,12 @@ enum Action {
 }
 
 #[derive(Subcommand)]
+enum GenerationAction {
+    List,
+    Use { identity: String },
+}
+
+#[derive(Subcommand)]
 enum SelfAction {
     /// Install this prebuilt executable and add it to the user PATH.
     Install(install::Options),
@@ -238,6 +275,8 @@ enum Dependency {
         reference: Option<String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         options: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Box<source::native::Spec>>,
     },
 }
 fn any_version() -> String {
@@ -281,6 +320,12 @@ struct Manifest {
     link: cpuv_relocate::linking::Selection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vcpkg: Option<vcpkg::Settings>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tools: BTreeMap<String, source::managed::Artifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build: Option<source::native::Build>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<runtime::Plan>,
 }
 fn link_selection_empty(selection: &cpuv_relocate::linking::Selection) -> bool {
     selection == &cpuv_relocate::linking::Selection::default()
@@ -336,6 +381,16 @@ fn read_manifest(root: &Path) -> Result<Manifest> {
         .contains(&m.project.std.as_str()),
         "Unsupported C++ standard; choose a GCC -std= value from C++98 through C++26"
     );
+    if let Some(build) = &m.build {
+        source::native::validate_build(build)?;
+        ensure!(
+            build.tools.is_empty() && build.install.is_empty(),
+            "Use pinned [tools] for project builds; build.tools and build.install are source-package fields"
+        );
+    }
+    if let Some(runtime) = &m.runtime {
+        runtime.validate()?;
+    }
     Ok(m)
 }
 
@@ -508,6 +563,9 @@ fn init(root: &Path, cli: &Cli) -> Result<()> {
             compiler: tc.compiler_id(),
             abi: tc.runtime_tag(),
         },
+        tools: BTreeMap::new(),
+        build: None,
+        runtime: None,
         dependencies: BTreeMap::new(),
         link: Default::default(),
     };
@@ -593,7 +651,7 @@ async fn add(root: &Path, cli: &Cli, requested: &[String], needed: bool) -> Resu
             .map_or(cpuv_solver::PREFIX, |provider| {
                 provider.package_prefix.as_str()
             });
-        let locked: Option<Lock> = fs::read_to_string(root.join("cpuv.lock"))
+        let locked: Option<Lock> = cpuv_core::locks::read(&root.join("cpuv.lock"))
             .ok()
             .and_then(|text| toml::from_str(&text).ok());
         let keep_lock = needed
@@ -633,9 +691,22 @@ async fn sync(
     update: Option<(&[String], bool)>,
     force_resolve: bool,
 ) -> Result<()> {
+    sync_request(root, cli, update, force_resolve, None).await
+}
+
+async fn sync_request(
+    root: &Path,
+    cli: &Cli,
+    update: Option<(&[String], bool)>,
+    force_resolve: bool,
+    declaration: Option<(String, Dependency)>,
+) -> Result<()> {
     let start = Instant::now();
     let _guard = project_lock(root)?;
     let mut manifest = read_manifest(root)?;
+    if let Some((name, dependency)) = declaration {
+        manifest.dependencies.insert(name, dependency);
+    }
     if let Some(configuration) = &cli.configuration {
         manifest.project.configuration = configuration.clone();
     }
@@ -680,6 +751,7 @@ async fn sync(
                             linkage: None,
                             reference: Some(input.clone()),
                             options: BTreeMap::new(),
+                            source: None,
                         }
                     } else {
                         Dependency::Simple(if op.is_empty() {
@@ -699,7 +771,43 @@ async fn sync(
             _ => Backend::Auto,
         };
     }
+    if cli.offline
+        && manifest.backend != Backend::Auto
+        && !force_resolve
+        && update.is_none()
+        && !cli.reset_profile
+        && !cli.from_source
+        && !source::custom_profile_requested()
+        && root.join("cpuv.lock").is_file()
+    {
+        let payload = cpuv_core::locks::read(&root.join("cpuv.lock"))?;
+        let artifact = artifacts::location(
+            &cache_dir(cli)?,
+            &payload,
+            &request_hash(&manifest)?,
+            &cpuv_toolchain::identity(&tc)?.portable_digest()?,
+        );
+        if artifact.is_dir() {
+            source::native::verify_local_inputs(&profiles::project_root(root)?, &manifest)?;
+            let stage = artifacts::restore(root, cli, &manifest, &tc, &payload, &artifact)?;
+            artifacts::commit(root, stage)?;
+            println!(
+                "Restored the locked development environment from verified offline artifacts."
+            );
+            return Ok(());
+        }
+    }
     if manifest.backend == Backend::Vcpkg {
+        ensure!(
+            !manifest.dependencies.values().any(|d| matches!(
+                d,
+                Dependency::Detailed {
+                    source: Some(_),
+                    ..
+                }
+            )),
+            "Declarative source dependencies require the Conan provider; use a separate profile for vcpkg"
+        );
         manifest.vcpkg.get_or_insert_with(Default::default);
         manifest.toolchain = PinnedToolchain {
             target: tc.abi.target_triple.clone(),
@@ -716,6 +824,15 @@ async fn sync(
         || tc.provider.is_none()
         || source::custom_profile_requested()
         || source::explicit_references(&manifest)
+        || manifest.dependencies.values().any(|d| {
+            matches!(
+                d,
+                Dependency::Detailed {
+                    source: Some(_),
+                    ..
+                }
+            )
+        })
         || manifest
             .dependencies
             .values()
@@ -749,7 +866,7 @@ async fn sync(
     );
     let lock_path = root.join("cpuv.lock");
     let old_lock: Option<Lock> = if lock_path.is_file() {
-        Some(toml::from_str(&fs::read_to_string(&lock_path)?).context("Invalid cpuv.lock")?)
+        Some(toml::from_str(&cpuv_core::locks::read(&lock_path)?).context("Invalid cpuv.lock")?)
     } else {
         None
     };
@@ -980,9 +1097,23 @@ async fn sync(
         stage.path().join("cpuv.toml"),
         toml::to_string_pretty(&manifest)?,
     )?;
-    fs::write(
-        stage.path().join("cpuv.lock"),
-        toml::to_string_pretty(&lock)?,
+    cpuv_core::locks::write(
+        root,
+        &stage.path().join("cpuv.lock"),
+        &toml::to_string_pretty(&lock)?,
+        &request_hash(&manifest)?,
+    )?;
+    let snapshot_env = if environment_reused {
+        root.join(".cpuv/env")
+    } else {
+        stage_env.clone()
+    };
+    artifacts::store(
+        root,
+        cli,
+        &toml::to_string_pretty(&lock)?,
+        &snapshot_env,
+        &tc,
     )?;
     stage_auxiliary(stage.path(), root, &tc)?;
     let mut targets = vec![
@@ -1186,6 +1317,11 @@ async fn execute(mut cli: Cli) -> Result<i32> {
     {
         return update::run(options, cli.offline).await;
     }
+    let cache_root = cache_dir(&cli)?;
+    if let Action::Cache { command } = &cli.command {
+        return cache::execute(command, &cache_root);
+    }
+    let _cache_lease = cache::lease(&cache_root, false)?;
     fs::create_dir_all(&cli.project)?;
     let mut root = cpuv_toolchain::driver_path(cli.project.canonicalize()?);
     if let Action::Profile { command } = &cli.command {
@@ -1214,14 +1350,21 @@ async fn execute(mut cli: Cli) -> Result<i32> {
             );
         }
     }
+    cache::register(&cache_root, &root)?;
     if cli.compiler.is_none() && root.join(".cpuv/toolchain.json").is_file() {
         let saved: Toolchain =
             serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
         cli.compiler = Some(saved.compiler_path);
     }
+    if let Action::Offline { command } = &cli.command {
+        return offline::execute(command, &root, &cli).await;
+    }
+    if let Action::Search { catalog, query } = &cli.command {
+        return search::execute(&root, &cli, catalog, query).await;
+    }
     if let Action::Toolchain { command } = &cli.command {
         if let Some(action) = command {
-            return toolchains::execute(action, &cli);
+            return toolchains::execute(action, &cli).await;
         }
         println!(
             "{}",
@@ -1272,6 +1415,41 @@ async fn execute(mut cli: Cli) -> Result<i32> {
         )
         .await;
     }
+    if let Action::Generation { command } = &cli.command {
+        match command {
+            GenerationAction::List => {
+                let _guard = cpuv_core::lease(&root, false)?;
+                let parent = root.join(".cpuv/generations");
+                let mut identities = Vec::new();
+                if parent.is_dir() {
+                    for entry in fs::read_dir(parent)? {
+                        let entry = entry?;
+                        if entry.path().join("generation.json").is_file() {
+                            identities.push(serde_json::from_slice::<serde_json::Value>(
+                                &fs::read(entry.path().join("generation.json"))?,
+                            )?);
+                        }
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&identities)?);
+            }
+            GenerationAction::Use { identity } => {
+                cpuv_core::safe_relative(Path::new(identity))?;
+                let metadata: cpuv_relocate::Environment = serde_json::from_slice(&fs::read(
+                    root.join(".cpuv/generations")
+                        .join(identity)
+                        .join("env/manifest.json"),
+                )?)?;
+                metadata.tool_identity.verify()?;
+                cpuv_core::generations::restore(&root, identity)?;
+                println!("Restored generation {identity}");
+            }
+        }
+        return Ok(0);
+    }
+    if let Action::Source { command } = &cli.command {
+        return source::native::execute(command, &root, &cli).await;
+    }
     if let Action::Conan { arguments } = &cli.command {
         return source::execute(&root, &cli, arguments).await;
     }
@@ -1296,8 +1474,11 @@ async fn execute(mut cli: Cli) -> Result<i32> {
             } else {
                 root.join(".cpuv/build").join(binary)
             };
+            let runtime = read_manifest(&root)?.runtime.unwrap_or_default();
             let assets: Vec<_> = assets
                 .iter()
+                .chain(runtime.assets.iter())
+                .chain(runtime.plugins.iter())
                 .map(|a| {
                     if a.is_absolute() {
                         a.clone()
@@ -1306,7 +1487,22 @@ async fn execute(mut cli: Cli) -> Result<i32> {
                     }
                 })
                 .collect();
-            cpuv_shim::bundle::export(&metadata, &env, &binary, destination, &assets)?;
+            let search: Vec<_> = runtime
+                .search_paths
+                .iter()
+                .map(|p| source.join(p))
+                .collect();
+            cpuv_shim::bundle::export_with_runtime(
+                &metadata,
+                &env,
+                &binary,
+                destination,
+                &cpuv_shim::bundle::Runtime {
+                    assets: &assets,
+                    search: &search,
+                    environment: &runtime.environment,
+                },
+            )?;
             println!(
                 "Exported verified runtime files to {}",
                 destination.display()
@@ -1399,7 +1595,7 @@ async fn execute(mut cli: Cli) -> Result<i32> {
                     source::info(&root)?;
                     return Ok(0);
                 }
-                let lock: Lock = toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)?;
+                let lock: Lock = toml::from_str(&cpuv_core::locks::read(&root.join("cpuv.lock"))?)?;
                 println!("ABI: {}\nRepository: {}", lock.abi_hash, lock.repository);
                 for p in lock.packages {
                     println!("{} {}", p.name, p.version);
@@ -1411,6 +1607,11 @@ async fn execute(mut cli: Cli) -> Result<i32> {
         | Action::Build { .. }
         | Action::Test { .. }
         | Action::Conan { .. }
+        | Action::Source { .. }
+        | Action::Search { .. }
+        | Action::Offline { .. }
+        | Action::Cache { .. }
+        | Action::Generation { .. }
         | Action::Doctor { .. }
         | Action::SelfCommand { .. }
         | Action::Uninstall(_) => unreachable!(),

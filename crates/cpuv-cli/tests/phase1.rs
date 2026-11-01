@@ -584,8 +584,10 @@ fn phase1_local_repository_native_consumers_and_recovery() {
     fs::write(f.project.join("cpuv.toml"), &original.0).unwrap();
     f.fails(&["remove", "not-a-dependency"], "not a direct dependency");
     assert_eq!(original, f.state());
-    let mut corrupted_lock: toml::Value =
-        toml::from_str(std::str::from_utf8(&original.1).unwrap()).unwrap();
+    let mut corrupted_lock: toml::Value = toml::from_str(
+        &cpuv_core::locks::decode(std::str::from_utf8(&original.1).unwrap()).unwrap(),
+    )
+    .unwrap();
     let entries = corrupted_lock["packages"].as_array_mut().unwrap();
     entries.push(entries[0].clone());
     fs::write(

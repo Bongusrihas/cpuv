@@ -37,6 +37,8 @@ impl Default for Settings {
 #[derive(Serialize, Deserialize)]
 struct Lock {
     version: u32,
+    #[serde(default = "legacy_identity")]
+    identity_schema: u32,
     backend: String,
     dependencies: BTreeMap<String, Dependency>,
     settings: Settings,
@@ -45,10 +47,20 @@ struct Lock {
     installed_status: String,
 }
 
+fn legacy_identity() -> u32 {
+    1
+}
+
 fn run(command: &mut Command) -> Result<()> {
-    let status = command.status().context(
-        "Starting vcpkg/Git; Git and Microsoft C++ Build Tools are prerequisites for this adapter",
-    )?;
+    let log = std::env::temp_dir().join(format!(
+        "cpuv-vcpkg-{}-{}.log",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let status =
+        cpuv_core::process::run(command, &log, &cpuv_core::process::Limits::environment()?)?;
     ensure!(
         status.success(),
         "vcpkg provider operation failed with {status}; previous project environment is preserved"
@@ -215,11 +227,7 @@ pub async fn sync(
     let settings = manifest.vcpkg.clone().unwrap_or_default();
     validate(tc, &settings)?;
     let native_manifest = native_manifest(manifest, &settings)?;
-    let identity = cpuv_toolchain::identity(tc)?;
-    let identity_hash = blake3::hash(&serde_json::to_vec(&identity)?)
-        .to_hex()
-        .to_string();
-    let old_text = match fs::read_to_string(root.join("cpuv.lock")) {
+    let old_text = match cpuv_core::locks::read(&root.join("cpuv.lock")) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("Reading dependency lock"),
@@ -246,6 +254,23 @@ pub async fn sync(
     } else {
         None
     };
+    let identity_schema = if refresh {
+        2
+    } else {
+        old.as_ref().map_or(2, |lock| lock.identity_schema)
+    };
+    let identity = if identity_schema == 1 {
+        cpuv_toolchain::legacy_identity(tc)?
+    } else {
+        cpuv_toolchain::identity(tc)?
+    };
+    let identity_hash = if identity_schema == 1 {
+        blake3::hash(&serde_json::to_vec(&identity)?)
+            .to_hex()
+            .to_string()
+    } else {
+        identity.portable_digest()?
+    };
     if !refresh {
         let old = old
             .as_ref()
@@ -266,7 +291,23 @@ pub async fn sync(
             "Offline vcpkg requires a previous lock; resolve online first"
         );
         let env = root.join(".cpuv/env");
-        cpuv_core::verify(&env).context("Offline vcpkg currently requires an intact installed environment; repair online with cpuv sync")?;
+        if cpuv_core::verify(&env).is_err() {
+            let payload = old_text.as_ref().unwrap();
+            let artifact = artifacts::location(
+                &cache_dir(cli)?,
+                payload,
+                &request_hash(manifest)?,
+                &identity.portable_digest()?,
+            );
+            ensure!(
+                artifact.is_dir(),
+                "Locked vcpkg artifact is unavailable offline; restore its cache or run sync online"
+            );
+            let stage = artifacts::restore(root, cli, manifest, tc, payload, &artifact)?;
+            artifacts::commit(root, stage)?;
+            eprintln!("Restored pinned vcpkg environment from its verified offline artifact.");
+            return Ok(());
+        }
         let metadata: cpuv_relocate::Environment =
             serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;
         ensure!(
@@ -497,6 +538,7 @@ pub async fn sync(
     cpuv_core::seal(&env)?;
     let locked = Lock {
         version: 4,
+        identity_schema,
         backend: "vcpkg".into(),
         dependencies: manifest.dependencies.clone(),
         settings,
@@ -508,11 +550,14 @@ pub async fn sync(
         stage.path().join("cpuv.toml"),
         toml::to_string_pretty(manifest)?,
     )?;
-    fs::write(
-        stage.path().join("cpuv.lock"),
-        toml::to_string_pretty(&locked)?,
+    cpuv_core::locks::write(
+        root,
+        &stage.path().join("cpuv.lock"),
+        &toml::to_string_pretty(&locked)?,
+        &request_hash(manifest)?,
     )?;
     stage_auxiliary(stage.path(), root, tc)?;
+    artifacts::store(root, cli, &toml::to_string_pretty(&locked)?, &env, tc)?;
     cpuv_core::commit(
         root,
         stage,
@@ -527,6 +572,19 @@ pub async fn sync(
     )?;
     eprintln!("Ready from pinned vcpkg registry; use cpuv build/test with its CMake targets.");
     Ok(())
+}
+
+pub fn search(root: &Path, cli: &Cli, query: &str) -> Result<()> {
+    let settings = read_manifest(root)
+        .ok()
+        .and_then(|m| m.vcpkg)
+        .unwrap_or_default();
+    let cache = cache_dir(cli)?.join("vcpkg");
+    fs::create_dir_all(&cache)?;
+    let checkout = prepare(&cache, &settings, cli.offline)?;
+    run(Command::new(checkout.join("vcpkg.exe"))
+        .args(["search", query])
+        .env("VCPKG_DISABLE_METRICS", "1"))
 }
 
 #[cfg(test)]

@@ -9,6 +9,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 pub mod arguments;
+pub mod generations;
+pub mod locks;
+pub mod process;
 
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let mut temp =
@@ -70,7 +73,7 @@ fn no_reparse(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn contained(root: &Path, relative: &Path) -> Result<()> {
+pub fn contained(root: &Path, relative: &Path) -> Result<()> {
     safe_relative(relative)?;
     let mut path = root.to_owned();
     for part in relative.components() {
@@ -194,6 +197,38 @@ impl ToolIdentity {
         let mut identity = Self::capture(paths)?;
         identity.roots = roots;
         Ok(identity)
+    }
+    /// Location-independent identity used for portable provider binary cache keys.
+    pub fn portable_digest(&self) -> Result<String> {
+        let mut entries = Vec::new();
+        for (path, digest) in &self.files {
+            let root = self
+                .roots
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| path.starts_with(r))
+                .max_by_key(|(_, r)| r.components().count());
+            let key = if let Some((index, root)) = root {
+                format!(
+                    "sdk/{index}/{}",
+                    path.strip_prefix(root)?
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                )
+            } else {
+                format!(
+                    "tool/{}",
+                    path.file_name()
+                        .context("Tool identity has no file name")?
+                        .to_string_lossy()
+                )
+            };
+            entries.push((key, digest));
+        }
+        entries.sort();
+        Ok(blake3::hash(&serde_json::to_vec(&entries)?)
+            .to_hex()
+            .to_string())
     }
     pub fn verify(&self) -> Result<()> {
         ensure!(
@@ -322,6 +357,9 @@ pub fn recover(root: &Path) -> Result<()> {
 
 /// Stage lives within .cpuv. All old artifacts survive until a durable commit record.
 pub fn commit(root: &Path, stage: tempfile::TempDir, targets: &[(&str, &str)]) -> Result<()> {
+    if root.join("cpuv.toml").is_file() && root.join("cpuv.lock").is_file() {
+        generations::retain(root)?;
+    }
     commit_with(root, stage, targets, |_| Ok(()))
 }
 fn commit_with(
@@ -443,6 +481,29 @@ mod tests {
             "old"
         );
         recover(root.path()).unwrap();
+    }
+    #[test]
+    fn portable_tool_identity_survives_relocation_but_detects_sdk_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        for directory in [&a, &b] {
+            fs::create_dir_all(directory.join("sdk")).unwrap();
+            fs::write(directory.join("compiler.exe"), "compiler").unwrap();
+            fs::write(directory.join("sdk/header.h"), "header").unwrap();
+        }
+        let capture = |dir: &Path| {
+            ToolIdentity::capture_with_roots(
+                [dir.join("compiler.exe"), dir.join("sdk/header.h")],
+                vec![dir.join("sdk")],
+            )
+            .unwrap()
+            .portable_digest()
+            .unwrap()
+        };
+        assert_eq!(capture(&a), capture(&b));
+        fs::write(b.join("sdk/header.h"), "changed").unwrap();
+        assert_ne!(capture(&a), capture(&b));
     }
     #[test]
     fn compiler_content_change_is_detected() {

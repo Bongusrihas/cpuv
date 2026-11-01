@@ -204,7 +204,10 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
         build_type: "release".into(),
     };
     let linker = path.with_file_name(if clang { "lld-link.exe" } else { "link.exe" });
-    let linker = if linker.is_file() {
+    let explicit_lld = flags
+        .iter()
+        .any(|v| v.to_string_lossy().contains("fuse-ld=lld"));
+    let linker = if linker.is_file() && (!clang || explicit_lld) {
         linker
     } else {
         std::env::split_paths(&std::ffi::OsString::from(&environment["PATH"]))
@@ -212,6 +215,7 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
             .find(|p| p.is_file())
             .context("Microsoft linker not found")?
     };
+    let runtime_version = runtime_toolset(&abi.stdlib_release)?;
     let abi_hash = blake3::hash(&serde_json::to_vec(&abi)?).to_hex()[..32].to_owned();
     Ok(Toolchain {
         compiler_path: path.clone(),
@@ -228,7 +232,31 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
         observed_abi_options: BTreeMap::from([
             ("__cplusplus".into(), value("CPUV_LANG ")?),
             ("__STRICT_ANSI__".into(), "1".into()),
-        ]),
+            ("msvc_runtime_version".into(), runtime_version),
+        ])
+        .into_iter()
+        .filter(|(key, _)| clang || key != "msvc_runtime_version")
+        .collect(),
         diagnostics: vec![],
     })
+}
+
+// Compiler minor versions and MSBuild toolsets do not advance together (19.4x still uses v143).
+fn runtime_toolset(stl_release: &str) -> Result<String> {
+    ensure!(
+        stl_release.len() == 3 && stl_release.bytes().all(|b| b.is_ascii_digit()),
+        "Invalid observed Microsoft STL toolset version"
+    );
+    Ok(format!("v{stl_release}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn toolset_uses_the_observed_stl_release_instead_of_compiler_minor_arithmetic() {
+        assert_eq!(runtime_toolset("143").unwrap(), "v143");
+        assert_eq!(runtime_toolset("145").unwrap(), "v145");
+        assert!(runtime_toolset("14.44").is_err());
+    }
 }

@@ -1,0 +1,9 @@
+name = "llvm-cl-23.1.4"
+target = "x86_64-pc-windows-msvc"
+[compiler]
+version = "23.1.4"
+executable = "bin/clang-cl.exe"
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/clang%2Bllvm-23.1.4-x86_64-pc-windows-msvc.tar.zst"
+sha256 = "1a3f2f998e230b5791cc4e2bfe11a1f7c07fe42c96ff44f227c9db0bedfaf091"
+archive = "tar.zst"
+strip_components = 1

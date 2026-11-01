@@ -1,5 +1,7 @@
 # Community catalog installation
 
+For the unreleased declarative archive/Git/local/SDK source adapters, provider-qualified search, portable locks and offline transfers, see [Phase 2](phase2.md). This page describes the catalog interfaces shared with 0.0.4.
+
 cpuv uses compatible MSYS2 UCRT64 or MINGW64 packages first. A missing package, another native MinGW GCC profile, custom flags, or --catalog selects ConanCenter for the entire environment. There is no cpuv library recipe file to create.
 
 For automatic fallback, a negative lookup from a cached MSYS2 index is refreshed once online before choosing ConanCenter. A newly downloaded index is not fetched a second time for the same operation, and offline mode never refreshes. Refresh errors are reported as unconfirmed availability rather than absence. cpuv lists the missing requirements; if fallback fails, its error retains the MSYS2 lookup and similar names along with the provider log. Suggestions come from that repository and do not select or alias a package. Published names and versions can differ between providers; package existence in another ecosystem is not proof of MSYS2 or ConanCenter availability. Catalog name/version resolution occurs before compilation, so a resolution failure alone is not evidence of ABI or linker incompatibility.

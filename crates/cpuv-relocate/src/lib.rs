@@ -332,6 +332,17 @@ pub fn validate_profile(metadata: &Environment, input: &[std::ffi::OsString]) ->
         };
         let built_flags = normalize(&metadata.source_flags);
         for arg in normalize(&options) {
+            // libstdc++ assertion checks do not alter its ABI (GCC 6 release notes).
+            let macro_name = arg
+                .strip_prefix("-D")
+                .or_else(|| arg.strip_prefix("-U"))
+                .and_then(|s| s.split('=').next());
+            if matches!(
+                macro_name,
+                Some("_GLIBCXX_ASSERTIONS" | "_GLIBCXX_NO_ASSERTIONS")
+            ) {
+                continue;
+            }
             let architecture_matches = (arg == "-m32" && metadata.source_arch == "x86")
                 || (arg == "-m64" && metadata.source_arch == "x86_64");
             let changes_profile = [
@@ -552,4 +563,39 @@ fn msvc_args(
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    #[test]
+    fn assertions_are_per_translation_unit_while_debug_containers_require_matching_abi() {
+        let environment:Environment=serde_json::from_value(serde_json::json!({
+            "schema":1,"compiler":"compiler","compiler_bin":"bin","abi_hash":"abi","standard":"c++20",
+            "include_dirs":[],"libraries":[],"defines":[],"cflags":[],"include_map":{},
+            "managed_binaries":true,"dependency_origin":"source","source_arch":"x86_64"
+        })).unwrap();
+        for arguments in [
+            vec!["-D_GLIBCXX_ASSERTIONS=1"],
+            vec!["-D", "_GLIBCXX_ASSERTIONS"],
+            vec!["-U_GLIBCXX_ASSERTIONS"],
+            vec!["-D_GLIBCXX_NO_ASSERTIONS"],
+        ] {
+            validate_profile(
+                &environment,
+                &arguments
+                    .iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        }
+        for flag in [
+            "-D_GLIBCXX_DEBUG",
+            "-D_GLIBCXX_USE_CXX11_ABI=0",
+            "-D_GLIBCXX_ASSERTIONS_OTHER=1",
+        ] {
+            assert!(validate_profile(&environment, &[flag.into()]).is_err());
+        }
+    }
 }

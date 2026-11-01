@@ -28,6 +28,7 @@ blake3.workspace = true
 walkdir.workspace = true
 tar.workspace = true
 flate2.workspace = true
+zstd.workspace = true
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 self-replace = "1.5"
 cpuv-toolchain.workspace = true
@@ -41,6 +42,6 @@ cpuv-core.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_System_Console", "Win32_System_Environment", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 
+
 [dev-dependencies]
-zstd.workspace = true
 shlex = "1.3"

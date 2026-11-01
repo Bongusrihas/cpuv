@@ -6,6 +6,8 @@ A C++ dependency, build, and run workflow for Windows.
 
 cpuv manages native C++ dependencies, prepares a project environment, and compiles and runs your code with one command. Downloaded packages live in a shared cache. Generated programs and compiler artifacts stay in the hidden .cpuv directory.
 
+The source tree also contains the **unreleased Phase 2** source-package, compiler provisioning, build-adapter, runtime, offline-transfer and cache-management work. See the [Phase 2 guide and acceptance gate](docs/phase2.md). Published 0.0.4 downloads retain their released behavior until a new release is built and published.
+
 ## Highlights
 
 - Parallel package downloads, with a configurable limit of 50 transfers by default.

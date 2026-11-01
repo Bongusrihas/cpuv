@@ -29,7 +29,7 @@ pub fn validate_request(root: &Path, metadata: &cpuv_relocate::Environment) -> R
         struct Request {
             dependencies: BTreeMap<String, Dependency>,
         }
-        let lock: Request = toml::from_str(&fs::read_to_string(root.join("cpuv.lock"))?)?;
+        let lock: Request = toml::from_str(&cpuv_core::locks::read(&root.join("cpuv.lock"))?)?;
         ensure!(
             lock.dependencies == manifest.dependencies,
             "Dependencies changed; run cpuv lock to update this environment"
@@ -91,6 +91,9 @@ mod tests {
             dependencies: BTreeMap::new(),
             link: Default::default(),
             vcpkg: None,
+            tools: BTreeMap::new(),
+            build: None,
+            runtime: None,
         };
         let previous = request_hash(&manifest).unwrap();
         manifest.link.libraries.push("plugin".into());

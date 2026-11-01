@@ -120,8 +120,23 @@ pub fn extract(
     fs::create_dir_all(root)?;
     let mut total = 0u64;
     let mut count = 0usize;
-    if spec.archive == "tar.gz" {
-        let decoder = flate2::read::GzDecoder::new(File::open(archive)?);
+    if matches!(spec.archive.as_str(), "tar.gz" | "tar.zst") {
+        let decoder: Box<dyn Read> = if spec.archive == "tar.zst" {
+            let maximum = std::env::var("CPUV_MAX_ZSTD_WINDOW_MIB")
+                .ok()
+                .map(|s| s.parse::<u32>())
+                .transpose()?
+                .unwrap_or(128);
+            ensure!(
+                maximum.is_power_of_two() && (32..=2048).contains(&maximum),
+                "CPUV_MAX_ZSTD_WINDOW_MIB must be a power of two between 32 and 2048"
+            );
+            let mut decoder = zstd::stream::read::Decoder::new(File::open(archive)?)?;
+            decoder.window_log_max(maximum.ilog2() + 20)?;
+            Box::new(decoder)
+        } else {
+            Box::new(flate2::read::GzDecoder::new(File::open(archive)?))
+        };
         let mut tar = tar::Archive::new(decoder);
         for entry in tar.entries()? {
             let mut entry = entry?;
@@ -149,6 +164,14 @@ pub fn extract(
                 kind.is_dir() || kind.is_file(),
                 "Source archive contains a link or special file"
             );
+            if kind.is_dir()
+                && entry
+                    .path()?
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::CurDir))
+            {
+                continue;
+            }
             let Some(path) = destination(root, &entry.path()?, spec.strip_components)? else {
                 continue;
             };
@@ -202,7 +225,7 @@ pub fn extract(
         }
     } else {
         bail!(
-            "Unsupported source archive format {}; use tar.gz or zip",
+            "Unsupported source archive format {}; use tar.gz, tar.zst or zip",
             spec.archive
         );
     }
@@ -213,6 +236,9 @@ pub fn inventory(root: &Path) -> Result<BTreeMap<String, String>> {
     let mut files = BTreeMap::new();
     for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
         let entry = entry?;
+        if entry.depth() > 0 {
+            cpuv_core::contained(root, entry.path().strip_prefix(root)?)?;
+        }
         ensure!(
             !entry.file_type().is_symlink(),
             "Source installations must not contain symbolic links"

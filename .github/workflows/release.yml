@@ -42,6 +42,7 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-make
       - name: Complete Phase 1 acceptance gate
         shell: pwsh
         env:
@@ -56,6 +57,21 @@ jobs:
         with:
           name: phase1-evidence
           path: ${{ runner.temp }}/cpuv-phase1-evidence
+          retention-days: 14
+      - name: Complete Phase 2 release acceptance gate
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.phase1-msys2.outputs.msys2-location }}
+        run: |
+          $compiler = Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/g++.exe'
+          ./scripts/test-phase2.ps1 -ReleaseBuild -Compiler $compiler -EvidenceDirectory "$env:RUNNER_TEMP/cpuv-phase2-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Phase 2 release acceptance gate failed' }
+      - name: Retain Phase 2 release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-evidence
+          path: ${{ runner.temp }}/cpuv-phase2-evidence
           retention-days: 14
       - uses: actions/upload-artifact@v4
         with:

@@ -11,6 +11,12 @@ mod msvc;
 mod msys;
 
 pub fn identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
+    capture_identity(tc, false)
+}
+pub fn legacy_identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
+    capture_identity(tc, true)
+}
+fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdentity> {
     let mut files = std::collections::BTreeSet::from([tc.compiler_path.clone()]);
     let mut roots = Vec::new();
     if let Some(bin) = tc.compiler_path.parent() {
@@ -18,7 +24,18 @@ pub fn identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
             if entry.file_type()?.is_file()
-                && (tc.driver == "msvc" && (name.ends_with(".exe") || name.ends_with(".dll"))
+                && (tc.driver == "msvc"
+                    && (name.ends_with(".dll")
+                        || (legacy && name.ends_with(".exe"))
+                        || [
+                            "lib.exe",
+                            "llvm-lib.exe",
+                            "rc.exe",
+                            "mt.exe",
+                            "mspdbsrv.exe",
+                            "cvtres.exe",
+                        ]
+                        .contains(&name.as_str()))
                     || [
                         "clang.exe",
                         "lld.exe",
@@ -615,9 +632,19 @@ pub fn doctor(tc: &Toolchain, flags: &[std::ffi::OsString]) -> Result<serde_json
         .context("Starting the compiler/linker check")?;
     ensure!(
         output.status.success(),
-        "Selected GCC could not compile/link a native C++ program with these flags:\n{}",
+        "Selected compiler could not compile/link a native C++ program with these flags:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let runnable = tc.abi.arch == std::env::consts::ARCH
+        || cfg!(target_arch = "x86_64") && tc.abi.arch == "x86";
+    if !runnable {
+        return Ok(
+            serde_json::json!({"compiler":tc.compiler_path,"target":tc.abi.target_triple,
+            "linker":tc.linker,"flags":flags.iter().map(|s|s.to_string_lossy()).collect::<Vec<_>>(),"compile_link":"passed",
+            "compile_link_run":"cross-compile-only","run":"not-run on this host",
+            "universal_abi_guarantee":false}),
+        );
+    }
     let output = compiler_command(&binary)?.env("PATH", {
         let mut paths = vec![tc.compiler_path.parent().unwrap().to_owned()];
         if let Some(path) = std::env::var_os("PATH") { paths.extend(std::env::split_paths(&path)); }
@@ -629,7 +656,42 @@ pub fn doctor(tc: &Toolchain, flags: &[std::ffi::OsString]) -> Result<serde_json
         output.status
     );
     Ok(
-        serde_json::json!({"compiler":tc.compiler_path,"target":tc.abi.target_triple,"linker":tc.linker,"flags":flags,"compile_link_run":"passed","universal_abi_guarantee":false}),
+        serde_json::json!({"compiler":tc.compiler_path,"target":tc.abi.target_triple,"linker":tc.linker,"flags":flags.iter().map(|s|s.to_string_lossy()).collect::<Vec<_>>(),"compile_link_run":"passed","universal_abi_guarantee":false}),
+    )
+}
+
+pub fn capabilities(tc: &Toolchain) -> Result<serde_json::Value> {
+    let baseline = doctor(tc, &[])?;
+    let options: Vec<(&str, Vec<std::ffi::OsString>)> = if tc.driver == "msvc" {
+        vec![(
+            "lto",
+            if tc.abi.compiler_family == "clang" {
+                vec!["/clang:-flto".into(), "/clang:-fuse-ld=lld".into()]
+            } else {
+                vec!["/GL".into()]
+            },
+        )]
+    } else {
+        vec![
+            ("lto", vec!["-flto".into()]),
+            ("lld", vec!["-fuse-ld=lld".into()]),
+            ("bfd", vec!["-fuse-ld=bfd".into()]),
+            ("gold", vec!["-fuse-ld=gold".into()]),
+        ]
+    };
+    let mut probes = std::collections::BTreeMap::new();
+    for (name, flags) in options {
+        probes.insert(
+            name,
+            match doctor(tc, &flags) {
+                Ok(evidence) => serde_json::json!({"supported":true,"evidence":evidence}),
+                Err(error) => serde_json::json!({"supported":false,"reason":format!("{error:#}")}),
+            },
+        );
+    }
+    Ok(
+        serde_json::json!({"schema":1,"baseline":baseline,"probes":probes,
+        "identity":identity(tc)?.portable_digest()?,"driver":tc.driver,"abi":tc.abi}),
     )
 }
 
