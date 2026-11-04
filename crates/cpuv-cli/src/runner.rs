@@ -608,7 +608,18 @@ pub fn run(root: &Path, args: &[OsString], no_run: bool) -> Result<i32> {
 
 /// Archive existing loose binary artifacts without deleting user files.
 pub fn clean(root: &Path) -> Result<usize> {
+    let _environment_guard = cpuv_core::lease(root, false)?;
     let state = state_directory(root)?;
+    fs::create_dir_all(state.join("build"))?;
+    let guard = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("build/build.lock"))?;
+    guard
+        .try_lock_exclusive()
+        .context("Another build or program is using this project's build directory")?;
     let legacy = state.join("build/legacy");
     let mut files = Vec::new();
     for entry in fs::read_dir(root)? {

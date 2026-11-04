@@ -1,5 +1,7 @@
 # 16 · Implementation status and roadmap
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Quality evidence](11_TESTING_AND_QUALITY.md) · [Issue details](19_KNOWN_ISSUES_AND_TECHNICAL_DEBT.md)
 
 Snapshot: 2026-10-17, application 0.0.2 working tree, base `4889f1f`. The version is not evidence that a corresponding GitHub release was published. Status labels describe the inspected source and checks, not every machine.

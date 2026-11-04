@@ -4,7 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
-    process::{Command, ExitStatus, Stdio},
+    process::{Command, ExitStatus, Output, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -150,13 +150,63 @@ mod windows {
 }
 
 pub fn run(command: &mut Command, log: &Path, limits: &Limits) -> Result<ExitStatus> {
+    Ok(execute(command, log, limits, true)?.status)
+}
+
+/// Short, noninteractive observations must not hang or buffer unlimited child output.
+pub fn capture(command: &mut Command) -> Result<Output> {
+    let limits = Limits {
+        timeout: Duration::from_secs(30),
+        log_bytes: 2 * 1024 * 1024,
+        processes: 32,
+        memory_bytes: 0,
+    };
+    capture_with_limits(command, &limits)
+}
+
+pub trait CommandOutput {
+    fn bounded_output(&mut self) -> Result<Output>;
+}
+impl CommandOutput for Command {
+    fn bounded_output(&mut self) -> Result<Output> {
+        capture(self)
+    }
+}
+
+pub fn capture_with_limits(command: &mut Command, limits: &Limits) -> Result<Output> {
+    let log = tempfile::NamedTempFile::new()?;
+    command.stdin(Stdio::null());
+    let result = execute(command, log.path(), limits, false);
+    if let Err(error) = result {
+        let details = fs::read_to_string(log.path()).unwrap_or_default();
+        let tail = details
+            .lines()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(error)
+            .map_err(|error| anyhow::anyhow!("{error:#}\nProbe diagnostics:\n{tail}"));
+    }
+    result
+}
+
+fn execute(command: &mut Command, log: &Path, limits: &Limits, echo: bool) -> Result<Output> {
     ensure!(
         limits.log_bytes > 0,
         "CPUV_MAX_LOG_MIB must be greater than zero"
     );
     fs::create_dir_all(log.parent().context("Build log has no parent")?)?;
     let mut file = OpenOptions::new().create(true).append(true).open(log)?;
-    writeln!(file, "command: {command:?}")?;
+    writeln!(
+        file,
+        "command: {:?} ({} arguments; argument/environment values omitted)",
+        command.get_program(),
+        command.get_args().count()
+    )?;
     let initial = file.metadata()?.len();
     ensure!(
         initial < limits.log_bytes,
@@ -188,23 +238,27 @@ pub fn run(command: &mut Command, log: &Path, limits: &Limits) -> Result<ExitSta
         bytes: Arc<AtomicU64>,
         overflow: Arc<AtomicBool>,
         cap: u64,
-    ) -> std::thread::JoinHandle<Result<()>> {
+        echo: bool,
+    ) -> std::thread::JoinHandle<Result<Vec<u8>>> {
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
+            let mut captured = Vec::new();
             loop {
                 let count = input.read(&mut buffer)?;
                 if count == 0 {
-                    return Ok(());
+                    return Ok(captured);
                 }
                 let previous = bytes.fetch_add(count as u64, Ordering::SeqCst);
                 if previous.saturating_add(count as u64) > cap {
                     overflow.store(true, Ordering::SeqCst);
-                    return Ok(());
+                    return Ok(captured);
                 }
                 file.lock()
                     .map_err(|_| anyhow::anyhow!("Build log lock failed"))?
                     .write_all(&buffer[..count])?;
-                if stderr {
+                if !echo {
+                    captured.extend_from_slice(&buffer[..count]);
+                } else if stderr {
                     std::io::stderr().write_all(&buffer[..count])?;
                 } else {
                     std::io::stdout().write_all(&buffer[..count])?;
@@ -219,6 +273,7 @@ pub fn run(command: &mut Command, log: &Path, limits: &Limits) -> Result<ExitSta
         bytes.clone(),
         overflow.clone(),
         limits.log_bytes,
+        echo,
     );
     let errors = stream(
         child.stderr.take().unwrap(),
@@ -227,6 +282,7 @@ pub fn run(command: &mut Command, log: &Path, limits: &Limits) -> Result<ExitSta
         bytes,
         overflow.clone(),
         limits.log_bytes,
+        echo,
     );
     let started = Instant::now();
     let mut reason = None;
@@ -269,17 +325,70 @@ pub fn run(command: &mut Command, log: &Path, limits: &Limits) -> Result<ExitSta
             log.display()
         );
     }
-    first?;
-    second?;
+    let stdout = first?;
+    let stderr = second?;
     file.lock()
         .map_err(|_| anyhow::anyhow!("Build log lock failed"))?
         .sync_all()?;
-    Ok(status)
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_preserves_streams_and_exit_status_without_leaking_arguments_to_logs() {
+        let limits = Limits {
+            timeout: Duration::from_secs(5),
+            log_bytes: 65536,
+            processes: 16,
+            memory_bytes: 0,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("probe.log");
+        let mut command = Command::new("cmd.exe");
+        command.args(["/d", "/c", "echo stdout & echo stderr 1>&2 & exit /b 7"]);
+        command.env("SECRET_PROBE_VALUE", "do-not-log-this");
+        let output = execute(&mut command, &log, &limits, false).unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("stdout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stderr"));
+        assert!(!fs::read_to_string(log).unwrap().contains("do-not-log-this"));
+    }
+    #[test]
+    fn captures_stop_sleepers_and_output_floods() {
+        let limits = Limits {
+            timeout: Duration::from_millis(150),
+            log_bytes: 4096,
+            processes: 16,
+            memory_bytes: 0,
+        };
+        let start = Instant::now();
+        let error = capture_with_limits(
+            Command::new("cmd.exe").args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"]),
+            &limits,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("time limit"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let error = capture_with_limits(
+            Command::new("cmd.exe").args([
+                "/d",
+                "/c",
+                "for /L %i in (1,1,10000) do @echo flood-output-flood-output-flood-output",
+            ]),
+            &Limits {
+                timeout: Duration::from_secs(5),
+                ..limits
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("log size limit"));
+    }
     #[test]
     fn timeout_stops_child_tree_and_retains_diagnostics() {
         let root = tempfile::tempdir().unwrap();

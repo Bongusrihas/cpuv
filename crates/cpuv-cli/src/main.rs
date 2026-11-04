@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
+use cpuv_core::atomic_write as write_atomic;
 use cpuv_fetch::{DEFAULT_REPOSITORY, DownloadStats, Fetcher};
 use cpuv_solver::{Index, Package};
 use cpuv_store::{Store, StoredPackage};
@@ -349,15 +350,6 @@ struct Lock {
     repository: String,
     dependencies: BTreeMap<String, Dependency>,
     packages: Vec<Package>,
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut temp = tempfile::NamedTempFile::new_in(path.parent().context("No parent")?)?;
-    use std::io::Write;
-    temp.write_all(bytes)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|e| e.error)?;
-    Ok(())
 }
 
 fn project_lock(root: &Path) -> Result<File> {
@@ -781,13 +773,7 @@ async fn sync_request(
         && root.join("cpuv.lock").is_file()
     {
         let payload = cpuv_core::locks::read(&root.join("cpuv.lock"))?;
-        let artifact = artifacts::location(
-            &cache_dir(cli)?,
-            &payload,
-            &request_hash(&manifest)?,
-            &cpuv_toolchain::identity(&tc)?.portable_digest()?,
-        );
-        if artifact.is_dir() {
+        if let Some(artifact) = artifacts::cached(root, cli, &manifest, &tc, &payload)? {
             source::native::verify_local_inputs(&profiles::project_root(root)?, &manifest)?;
             let stage = artifacts::restore(root, cli, &manifest, &tc, &payload, &artifact)?;
             artifacts::commit(root, stage)?;
@@ -967,24 +953,17 @@ async fn sync_request(
     let dependency_resolution_ms =
         (resolve_start.elapsed().as_secs_f64() * 1000.0 - index_fetch_ms).max(0.0);
     validate_packages(&packages, namespace)?;
-    // Rolling repositories are not a universal ABI guarantee. Never silently use
-    // a newer major runtime with an older host compiler in this Phase A prototype.
-    for p in &packages {
-        if ["cc-libs", "libstdc++"]
-            .iter()
-            .any(|name| p.name == format!("{namespace}{name}"))
-        {
-            let major = p.version.split('.').next().unwrap_or("");
-            if major != tc.abi.compiler_abi_major {
-                eprintln!(
-                    "Repository runtime {} differs from GCC {}; querying ConanCenter for the selected compiler",
-                    p.version, tc.gcc_version
-                );
-                manifest.backend = Backend::Conan;
-                return source::sync(root, cli, &manifest, &tc, force_resolve || update.is_some())
-                    .await;
-            }
-        }
+    if let Some(package) = cpuv_solver::compiler_build_mismatch(
+        &packages,
+        &tc.abi.compiler_family,
+        &tc.abi.compiler_abi_major,
+    ) {
+        eprintln!(
+            "Repository compiler package {} {} differs from compiler {}; querying ConanCenter for the selected compiler",
+            package.name, package.version, tc.gcc_version
+        );
+        manifest.backend = Backend::Conan;
+        return source::sync(root, cli, &manifest, &tc, force_resolve || update.is_some()).await;
     }
     let store = Store::new(cache.join("store"))?
         .with_extraction_limits(cli.transfer_limits().expanded_bytes, cli.max_extract_files);
@@ -1028,10 +1007,19 @@ async fn sync_request(
         .tempdir_in(root.join(".cpuv"))?;
     let stage_env = stage.path().join("env");
     let final_env = root.join(".cpuv/env");
+    let lock = Lock {
+        version: 1,
+        abi_hash: tc.abi_hash.clone(),
+        repository,
+        dependencies: manifest.dependencies.clone(),
+        packages: packages.clone(),
+    };
+    let lock_payload = toml::to_string_pretty(&lock)?;
+    let lock_identity = cpuv_core::locks::identity(&lock_payload)?;
     let link_start = Instant::now();
     let expected_request_hash = request_hash(&manifest)?;
     let identity = serde_json::to_vec(&(
-        7,
+        8,
         &expected_request_hash,
         &tc.provider,
         &tc.abi_hash,
@@ -1047,13 +1035,18 @@ async fn sync_request(
         && serde_json::from_slice::<cpuv_relocate::Environment>(
             &fs::read(final_env.join("manifest.json")).unwrap_or_default(),
         )
-        .is_ok_and(|m| m.request_hash == expected_request_hash && m.tool_identity.verify().is_ok())
+        .is_ok_and(|m| {
+            m.request_hash == expected_request_hash
+                && m.lock_identity.as_deref() == Some(lock_identity.as_str())
+                && m.tool_identity.verify().is_ok()
+        })
         && [
             "manifest.json",
             "include_map.json",
             "cpuv.specs",
             "link-plan.json",
             "compatibility.json",
+            "toolchain-state.json",
         ]
         .iter()
         .all(|name| final_env.join(name).is_file())
@@ -1081,17 +1074,10 @@ async fn sync_request(
         metadata_ms =
             (metadata_start.elapsed().as_secs_f64() * 1000.0 - binary_inspection_ms).max(0.0);
         fs::write(stage_env.join("install-state.json"), identity)?;
-        cpuv_core::seal(&stage_env)?;
+        maintenance::bind_lock(&stage_env, &lock_payload)?;
         stats
     };
     let environment_prepare_ms = link_start.elapsed().as_secs_f64() * 1000.0;
-    let lock = Lock {
-        version: 1,
-        abi_hash: tc.abi_hash.clone(),
-        repository,
-        dependencies: manifest.dependencies.clone(),
-        packages: packages.clone(),
-    };
     // Prepare every artifact before switching the live environment.
     fs::write(
         stage.path().join("cpuv.toml"),
@@ -1108,13 +1094,13 @@ async fn sync_request(
     } else {
         stage_env.clone()
     };
-    artifacts::store(
-        root,
-        cli,
-        &toml::to_string_pretty(&lock)?,
-        &snapshot_env,
-        &tc,
-    )?;
+    // MSYS2 can reconstruct from its verified archive/CAS closure. Make the
+    // independent deployed snapshot on offline sync or export, not every add.
+    if cli.offline && locked {
+        artifacts::store(root, cli, &lock_payload, &snapshot_env, &tc)?;
+    } else {
+        artifacts::verify_deployed(&snapshot_env)?;
+    }
     stage_auxiliary(stage.path(), root, &tc)?;
     let mut targets = vec![
         ("cpuv.toml", "cpuv.toml"),
@@ -1207,6 +1193,7 @@ fn configure_environment(
     metadata.configuration = manifest.project.configuration.clone();
     metadata.driver = tc.driver.clone();
     metadata.process_environment = tc.environment.clone();
+    maintenance::record_toolchain(env, tc)?;
     let packages: Vec<_> = stored
         .iter()
         .map(|package| cpuv_relocate::linking::PackageFiles {
@@ -1325,7 +1312,11 @@ async fn execute(mut cli: Cli) -> Result<i32> {
     fs::create_dir_all(&cli.project)?;
     let mut root = cpuv_toolchain::driver_path(cli.project.canonicalize()?);
     if let Action::Profile { command } = &cli.command {
-        return profiles::execute(command, &root, &cli);
+        let result = profiles::execute(command, &root, &cli)?;
+        if let profiles::Action::Create { name } = command {
+            cache::register(&cache_root, &profiles::directory(&root, name)?)?;
+        }
+        return Ok(result);
     }
     if let Some(name) = &cli.profile {
         root = profiles::directory(&root, name)?;
@@ -1350,7 +1341,9 @@ async fn execute(mut cli: Cli) -> Result<i32> {
             );
         }
     }
-    cache::register(&cache_root, &root)?;
+    if root.join("cpuv.toml").is_file() || root.join(".cpuv/env").is_dir() {
+        cache::register(&cache_root, &root)?;
+    }
     if cli.compiler.is_none() && root.join(".cpuv/toolchain.json").is_file() {
         let saved: Toolchain =
             serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
@@ -1510,7 +1503,10 @@ async fn execute(mut cli: Cli) -> Result<i32> {
         }
         Action::Verify => return maintenance::verify(&root),
         Action::Plan => return maintenance::plan(&root),
-        Action::Init => init(&root, &cli)?,
+        Action::Init => {
+            init(&root, &cli)?;
+            cache::register(&cache_root, &root)?;
+        }
         Action::Add { packages, needed } => add(&root, &cli, packages, *needed).await?,
         Action::Remove { packages } => sync(&root, &cli, Some((packages, true)), false).await?,
         Action::Sync => sync(&root, &cli, None, false).await?,
@@ -1553,6 +1549,7 @@ async fn execute(mut cli: Cli) -> Result<i32> {
             runner::clean(&root)?;
         }
         Action::Shell { print } => {
+            let guard = cpuv_core::lease(&root, false)?;
             let script = root.join(".cpuv/activate.ps1");
             ensure!(script.is_file(), "Run cpuv init first");
             if *print {
@@ -1562,6 +1559,8 @@ async fn execute(mut cli: Cli) -> Result<i32> {
                     ". '{}'",
                     cpuv_relocate::portable(&script).replace('\'', "''")
                 );
+                // Interactive shells must not hold a reader lease for their whole lifetime.
+                drop(guard);
                 return Ok(Command::new("powershell.exe")
                     .args([
                         "-NoLogo",
@@ -1578,6 +1577,7 @@ async fn execute(mut cli: Cli) -> Result<i32> {
             }
         }
         Action::Info => {
+            let _guard = cpuv_core::lease(&root, false)?;
             println!(
                 "Project: {}\nCache: {}",
                 root.display(),

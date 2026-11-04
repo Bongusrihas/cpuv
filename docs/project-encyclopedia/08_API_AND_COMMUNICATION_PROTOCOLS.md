@@ -1,5 +1,7 @@
 # 08 · APIs and communication protocols
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Configuration](12_CONFIGURATION_AND_ENVIRONMENT.md) · [Walkthrough](06_CODE_WALKTHROUGH.md)
 
 ## Interface boundary

@@ -1,5 +1,7 @@
 # 01 · Project overview
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Evidence and coverage](COVERAGE_MATRIX.md)
 
 Verified 2026-10-17 against the 0.0.2 working tree on `main`, based on commit `4889f1f`. The catalog backend and `rm` alias are uncommitted changes, not features established by that commit alone.

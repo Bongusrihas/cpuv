@@ -79,9 +79,9 @@ pub async fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
                     );
                 }
             }
-            let destination_absolute = std::path::absolute(destination)?;
+            let destination_absolute = cpuv_core::resolved_destination(destination)?;
             ensure!(
-                !destination_absolute.starts_with(profiles::project_root(root)?),
+                !destination_absolute.starts_with(profiles::project_root(root)?.canonicalize()?),
                 "Export outside the project source tree"
             );
             let parent = destination
@@ -114,16 +114,11 @@ pub async fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
             }
             fs::create_dir_all(stage.join("provider"))?;
             source::offline_transfer(root, cli, &stage.join("provider"), false).await?;
-            let registry: source::Registry =
-                toml::from_str(include_str!("../../../build-tools.toml"))?;
-            let tools = source::tools::prepare(
-                &registry,
-                &cache.join("catalog"),
-                cli.offline,
-                &cli.transfer_limits(),
-            )
-            .await?;
-            let mut paths = vec![tools.cmake, tools.ninja, tools.conan];
+            let mut paths = Vec::new();
+            let system = manifest.build.as_ref().map(|b| &b.system);
+            for name in transfer_bootstrap(&manifest.backend, system) {
+                paths.push(source::tools::selected(name, cli, &manifest.tools).await?);
+            }
             for (name, artifact) in &manifest.tools {
                 paths.push(source::managed::tool(name, artifact, cli).await?);
             }
@@ -278,6 +273,8 @@ pub async fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
             cpuv_core::generations::copy_tree(&directory.join("project"), temporary.path())?;
             fs::rename(temporary.path(), destination)?;
             let imported = cpuv_toolchain::driver_path(destination.canonicalize()?);
+            // Retain its tool/artifact references even if activation or provider restoration fails.
+            cache::register(&cache, &imported)?;
             let result = async {
                 fs::create_dir_all(imported.join(".cpuv"))?;
                 let manifest = read_manifest(&imported)?;
@@ -302,8 +299,8 @@ pub async fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
                     imported.display()
                 );
             }
-            source::offline_transfer(&imported, cli, &directory.join("provider"), true).await?;
-            cache::register(&cache, &imported)?;
+            source::offline_transfer(&imported, cli, &directory.join("provider"), true).await
+                .with_context(|| format!("Project and environment restored at {}, but provider cache restoration failed; preserve the transfer's provider archive for repair", imported.display()))?;
             println!(
                 "Offline development environment ready: {}",
                 imported.display()
@@ -311,4 +308,38 @@ pub async fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+fn transfer_bootstrap(
+    backend: &Backend,
+    system: Option<&source::native::System>,
+) -> &'static [&'static str] {
+    use source::native::System;
+    if *backend == Backend::Conan {
+        // Provider cache restoration constructs the build profiles even for Make/MSBuild consumers.
+        &["cmake", "ninja", "conan"]
+    } else {
+        match system {
+            None | Some(System::Cmake) => &["cmake", "ninja"],
+            Some(System::Meson) => &["ninja"],
+            _ => &[],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transfers_include_the_provider_closure_not_only_project_build_tools() {
+        assert_eq!(
+            transfer_bootstrap(&Backend::Conan, Some(&source::native::System::Make)),
+            &["cmake", "ninja", "conan"]
+        );
+        assert!(transfer_bootstrap(&Backend::Auto, Some(&source::native::System::Make)).is_empty());
+        assert_eq!(
+            transfer_bootstrap(&Backend::Vcpkg, None),
+            &["cmake", "ninja"]
+        );
+    }
 }

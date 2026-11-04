@@ -107,7 +107,7 @@ pub fn verify_runtime(metadata: &Environment, env: &Path) -> Result<()> {
         if !entry.file_type()?.is_file() || !is_pe(&entry.path())? {
             continue;
         }
-        let bytes = fs::read(entry.path())?;
+        let bytes = cpuv_core::binary::Data::open(&entry.path())?;
         let pe = goblin::pe::PE::parse(&bytes)?;
         let windows = system.join(
             if pe.header.coff_header.machine == 0x14c && cfg!(target_arch = "x86_64") {
@@ -135,7 +135,7 @@ pub fn verify_runtime(metadata: &Environment, env: &Path) -> Result<()> {
             for directory in &search {
                 if let Some(path) = locate(directory, import) {
                     cpuv_core::regular(&path)?;
-                    let dependency = fs::read(path)?;
+                    let dependency = cpuv_core::binary::Data::open(&path)?;
                     if goblin::pe::PE::parse(&dependency)?
                         .header
                         .coff_header
@@ -227,6 +227,7 @@ pub fn export_with_runtime(
         !destination.exists(),
         "Bundle destination already exists; select a new directory"
     );
+    outside_inputs(destination, env, assets)?;
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -251,7 +252,17 @@ pub fn export_with_runtime(
                 pending.push(output);
             }
         } else {
-            let inventory = cpuv_core::inventory(asset)?;
+            for entry in walkdir::WalkDir::new(asset) {
+                let entry = entry?;
+                if entry.file_type().is_dir() {
+                    let relative = entry.path().strip_prefix(asset)?;
+                    if !relative.as_os_str().is_empty() {
+                        cpuv_core::contained(asset, relative)?;
+                    }
+                    fs::create_dir_all(stage.join(name).join(relative))?;
+                }
+            }
+            let inventory = cpuv_core::inventory_all(asset)?;
             for relative in inventory.keys() {
                 let output = stage.join(name).join(relative);
                 copy_file(&asset.join(relative), &output, &mut receipt, stage)?;
@@ -261,7 +272,7 @@ pub fn export_with_runtime(
             }
         }
     }
-    let main_bytes = fs::read(&executable)?;
+    let main_bytes = cpuv_core::binary::Data::open(&executable)?;
     let main = goblin::pe::PE::parse(&main_bytes)
         .context("Bundle entry must be a Windows PE executable")?;
     let machine = main.header.coff_header.machine;
@@ -269,6 +280,8 @@ pub fn export_with_runtime(
         !main.is_lib,
         "Bundle entry must be an executable, not a DLL"
     );
+    drop(main);
+    drop(main_bytes);
     let mut search = vec![env.join("bin"), metadata.compiler_bin.clone()];
     search.extend_from_slice(runtime.search);
     if let Some(parent) = binary.parent() {
@@ -315,7 +328,7 @@ pub fn export_with_runtime(
         if !seen.insert(path.clone()) {
             continue;
         }
-        let bytes = fs::read(&path)?;
+        let bytes = cpuv_core::binary::Data::open(&path)?;
         let pe = goblin::pe::PE::parse(&bytes)?;
         ensure!(
             pe.header.coff_header.machine == machine,
@@ -412,4 +425,49 @@ exit $code
     )?;
     fs::rename(stage, destination).context("Publishing complete application bundle")?;
     Ok(())
+}
+
+fn outside_inputs(destination: &Path, env: &Path, assets: &[PathBuf]) -> Result<()> {
+    let output = cpuv_core::resolved_destination(destination)?;
+    for input in std::iter::once(env)
+        .chain(assets.iter().map(PathBuf::as_path))
+        .filter(|p| p.is_dir())
+    {
+        ensure!(
+            !output.starts_with(input.canonicalize()?),
+            "Bundle destination must be outside the dependency environment and asset directories"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bundle_outputs_cannot_recurse_into_asset_or_environment_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let env = root.path().join("env");
+        let asset = root.path().join("assets");
+        fs::create_dir_all(&env).unwrap();
+        fs::create_dir_all(&asset).unwrap();
+        assert!(
+            outside_inputs(
+                &env.join("nested/output"),
+                &env,
+                std::slice::from_ref(&asset)
+            )
+            .is_err()
+        );
+        assert!(
+            outside_inputs(
+                &asset.join("nested/output"),
+                &env,
+                std::slice::from_ref(&asset)
+            )
+            .is_err()
+        );
+        assert!(!env.join("nested").exists() && !asset.join("nested").exists());
+        outside_inputs(&root.path().join("application"), &env, &[asset]).unwrap();
+    }
 }

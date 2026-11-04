@@ -1,5 +1,7 @@
 # 13 · Engineering decisions and trade-offs
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Architecture](03_ARCHITECTURE_DEEP_DIVE.md) · [Issues](19_KNOWN_ISSUES_AND_TECHNICAL_DEBT.md)
 
 No historical ADR directory was found. These are reconstructed decision records. **Documented** indicates explicit existing policy/comments/changelog; **inferred** indicates likely motivation from implementation; **recommendation** indicates a new audit proposal. Alternatives are newly evaluated unless history explicitly establishes them.

@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 cpuv-solver.workspace = true
+cpuv-core.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true

@@ -5,6 +5,13 @@ use super::*;
 #[derive(Subcommand)]
 pub enum Action {
     Inspect,
+    /// Preview expired CPUv build logs. Recovery data, provider databases and generations are retained.
+    Logs {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long, default_value_t = 30, value_parser=clap::value_parser!(u64).range(1..=36500))]
+        older_than_days: u64,
+    },
     /// Preview unused immutable objects. --apply performs the listed deletions.
     Prune {
         #[arg(long)]
@@ -16,6 +23,81 @@ pub enum Action {
     Forget {
         project: PathBuf,
     },
+}
+
+fn log_name(path: &Path) -> bool {
+    if path
+        .extension()
+        .is_none_or(|e| !e.eq_ignore_ascii_case("log"))
+    {
+        return false;
+    }
+    let name = path.file_stem().unwrap_or_default().to_string_lossy();
+    [
+        "cmake-", "ctest-", "meson-", "make-", "msbuild-", "version-",
+    ]
+    .iter()
+    .any(|p| name.starts_with(p))
+        || name.split_once('-').is_some_and(|(pid, time)| {
+            !pid.is_empty()
+                && !time.is_empty()
+                && pid.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit())
+        })
+}
+
+fn prune_logs(cache: &Path, apply: bool, older_than_days: u64) -> Result<i32> {
+    let age = std::time::Duration::from_secs(
+        older_than_days
+            .checked_mul(86400)
+            .context("Log age overflow")?,
+    );
+    let mut directories = vec![(cache.to_owned(), PathBuf::from("catalog/logs"))];
+    directories.extend(
+        roots(cache)?
+            .into_iter()
+            .filter(|p| p.is_dir())
+            .map(|p| (p, PathBuf::from(".cpuv/logs"))),
+    );
+    let mut selected = Vec::new();
+    let mut bytes = 0u64;
+    for (root, relative) in directories {
+        cpuv_core::contained(&root, &relative)?;
+        let directory = root.join(relative);
+        if !directory.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if !log_name(&entry.path()) || !entry.file_type()?.is_file() {
+                continue;
+            }
+            cpuv_core::regular(&entry.path())?;
+            let metadata = entry.metadata()?;
+            if metadata
+                .modified()?
+                .elapsed()
+                .is_ok_and(|elapsed| elapsed >= age)
+            {
+                bytes = bytes.saturating_add(metadata.len());
+                selected.push(entry.path());
+            }
+        }
+    }
+    selected.sort();
+    selected.dedup();
+    for path in &selected {
+        if apply {
+            cpuv_core::regular(path)?;
+            fs::remove_file(path)?;
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &serde_json::json!({"schema":1,"kind":"logs","dry_run":!apply,"older_than_days":older_than_days,"selected":selected,"selected_bytes":bytes,"note":"Only recognized CPUv log files are selected. Quarantine, generations, lock backups and interrupted transactions are retained."})
+        )?
+    );
+    Ok(0)
 }
 
 pub fn lease(cache: &Path, exclusive: bool) -> Result<File> {
@@ -114,6 +196,19 @@ fn verified_object(path: &Path, directory: &str) -> Result<()> {
 fn entries(cache: &Path) -> Result<(Vec<Entry>, bool)> {
     let mut retained = Vec::new();
     let mut uncertain = false;
+    let mut by_request = BTreeMap::<String, Vec<PathBuf>>::new();
+    // Parse each immutable artifact's request only once, independent of project/history count.
+    if cache.join("environments").is_dir() {
+        for entry in fs::read_dir(cache.join("environments"))? {
+            let path = entry?.path();
+            let metadata = fs::read(path.join("env/manifest.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if let Some(hash) = metadata.as_ref().and_then(|m| m["request_hash"].as_str()) {
+                by_request.entry(hash.into()).or_default().push(path);
+            }
+        }
+    }
     for root in roots(cache)? {
         if !root.is_dir() {
             uncertain = true;
@@ -135,19 +230,13 @@ fn entries(cache: &Path) -> Result<(Vec<Entry>, bool)> {
                 serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;
             retained.extend(metadata.tool_identity.files.keys().cloned());
             // Match all immutable environment copies with this request, including old generations.
-            if cache.join("environments").is_dir() {
-                for artifact in fs::read_dir(cache.join("environments"))? {
-                    let artifact = artifact?.path();
-                    let request = artifact.join("env/manifest.json");
-                    if request.is_file() {
-                        let saved: cpuv_relocate::Environment =
-                            serde_json::from_slice(&fs::read(request)?)?;
-                        if saved.request_hash == metadata.request_hash {
-                            retained.push(artifact);
-                        }
-                    }
-                }
-            }
+            retained.extend(
+                by_request
+                    .get(&metadata.request_hash)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
             let request = env.join("request.toml");
             if request.is_file() {
                 let manifest: Manifest = toml::from_str(&fs::read_to_string(request)?)?;
@@ -229,6 +318,13 @@ fn entries(cache: &Path) -> Result<(Vec<Entry>, bool)> {
 
 pub fn execute(action: &Action, cache: &Path) -> Result<i32> {
     let _lease = lease(cache, true)?;
+    if let Action::Logs {
+        apply,
+        older_than_days,
+    } = action
+    {
+        return prune_logs(cache, *apply, *older_than_days);
+    }
     if let Action::Forget { project } = action {
         let project = cpuv_toolchain::driver_path(std::path::absolute(project)?);
         let mut roots = roots(cache)?;
@@ -244,6 +340,12 @@ pub fn execute(action: &Action, cache: &Path) -> Result<i32> {
     let total = bytes(cache)?;
     let mut remaining = total;
     let mut selected = Vec::new();
+    let protected_bytes: u64 = entries
+        .iter()
+        .filter(|e| e.protected)
+        .map(|e| e.bytes)
+        .sum();
+    let missing_projects: Vec<_> = roots(cache)?.into_iter().filter(|p| !p.is_dir()).collect();
     if let Action::Prune { apply, quota_mib } = action {
         let quota = quota_mib
             .map(|m| m.saturating_mul(1024 * 1024))
@@ -272,6 +374,9 @@ pub fn execute(action: &Action, cache: &Path) -> Result<i32> {
             "schema":1,"cache":cache,"total_bytes":total,"remaining_bytes":remaining,
             "entries":entries,"selected":selected,"dry_run":!matches!(action,Action::Prune {apply:true,..}),
             "conservative_retention":uncertain,"projects":roots(cache)?,
+            "protected_candidate_bytes":protected_bytes,"missing_projects":missing_projects,
+            "size_accounting":"Logical file lengths, including repeated hardlinks; not physical allocated disk bytes.",
+            "missing_project_remedy":"Use cpuv cache forget -- PROJECT only for a project intentionally removed.",
             "note":"Active generations, registered projects, recovery state and provisioned compilers are protected. Unowned or damaged objects are retained. Archives, store objects and provider-owned databases are retained; use provider maintenance for those. A quota cannot evict protected content."
         }))?
     );
@@ -281,6 +386,51 @@ pub fn execute(action: &Action, cache: &Path) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn log_retention_is_preview_first_and_preserves_unowned_and_recovery_files() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("catalog/logs");
+        fs::create_dir_all(&logs).unwrap();
+        let old = logs.join("123-456.log");
+        fs::write(&old, "old log").unwrap();
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400);
+        File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        let user = logs.join("personal.log");
+        fs::write(&user, "keep").unwrap();
+        File::options()
+            .write(true)
+            .open(&user)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        let recovery = root.path().join("quarantine");
+        fs::create_dir_all(&recovery).unwrap();
+        fs::write(recovery.join("123-456.log"), "keep").unwrap();
+        execute(
+            &Action::Logs {
+                apply: false,
+                older_than_days: 2,
+            },
+            root.path(),
+        )
+        .unwrap();
+        assert!(old.exists());
+        execute(
+            &Action::Logs {
+                apply: true,
+                older_than_days: 2,
+            },
+            root.path(),
+        )
+        .unwrap();
+        assert!(!old.exists());
+        assert!(user.exists() && recovery.join("123-456.log").exists());
+    }
     #[test]
     fn collection_requires_exclusive_access_and_preserves_missing_project_references() {
         let root = tempfile::tempdir().unwrap();

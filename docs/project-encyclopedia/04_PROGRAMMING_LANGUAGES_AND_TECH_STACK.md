@@ -1,5 +1,7 @@
 # 04 · Languages and technology stack
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Exact dependency catalog](21_REFERENCE_CATALOG.md)
 
 ## Languages and process boundaries

@@ -1,5 +1,6 @@
 //! Community catalog backend: cpuv contains no per-library source recipes.
 use super::*;
+use cpuv_core::process::CommandOutput as _;
 use std::collections::BTreeSet;
 mod archive;
 pub mod managed;
@@ -27,16 +28,6 @@ pub(crate) fn verify_cache_object(path: &Path, source_input: bool) -> Result<()>
     archive::verify(&path.join(contents), &files)
 }
 
-pub async fn build_tools(cli: &Cli) -> Result<(PathBuf, PathBuf)> {
-    let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
-    tools::build_tools(
-        &registry,
-        &cache_dir(cli)?.join("catalog"),
-        cli.offline,
-        &cli.transfer_limits(),
-    )
-    .await
-}
 #[derive(Clone, Serialize, Deserialize)]
 struct Archive {
     url: String,
@@ -443,7 +434,7 @@ fn configure_profile(
         .join("Microsoft Visual Studio/Installer/vswhere.exe");
         let output = Command::new(locator)
             .args(["-path", installation, "-property", "installationVersion"])
-            .output()?;
+            .bounded_output()?;
         ensure!(
             output.status.success(),
             "Visual Studio installation lookup failed"
@@ -707,6 +698,7 @@ fn prepare_metadata(
     let mut metadata = cpuv_relocate::Environment {
         schema: 1,
         request_hash: request_hash(manifest)?,
+        lock_identity: None,
         native_build_only: false,
         compiler: tc.compiler_path.clone(),
         compiler_bin: tc.compiler_path.parent().unwrap().to_owned(),
@@ -861,6 +853,7 @@ fn prepare_metadata(
             )?;
         }
     }
+    maintenance::record_toolchain(env, tc)?;
     Ok(versions)
 }
 
@@ -906,7 +899,6 @@ async fn prepare_context(
     let mut doctor_flags = flags.clone();
     doctor_flags.extend(profile.link.iter().map(OsString::from));
     cpuv_toolchain::doctor(&tc, &doctor_flags)?;
-    let registry: Registry = toml::from_str(include_str!("../../../build-tools.toml"))?;
     let base = cache_dir(cli)?.join("catalog");
     fs::create_dir_all(&base)?;
     let identity = if identity_schema == 1 {
@@ -946,7 +938,7 @@ async fn prepare_context(
     guard.try_lock_exclusive().context(
         "Another catalog operation is using this compiler/profile; retry when it finishes",
     )?;
-    let mut tools = tools::prepare(&registry, &base, cli.offline, &cli.transfer_limits()).await?;
+    let mut tools = tools::selected_tools(cli, artifacts).await?;
     let mut declared_bins = Vec::new();
     let mut declared_tools = BTreeMap::new();
     for (name, artifact) in artifacts {
@@ -1482,7 +1474,6 @@ pub async fn sync(
         env.join("catalog-files.json"),
         serde_json::to_vec_pretty(&inventory)?,
     )?;
-    cpuv_core::seal(&env)?;
     let mut manifest = manifest.clone();
     manifest.backend = Backend::Conan;
     manifest.toolchain = PinnedToolchain {
@@ -1500,6 +1491,7 @@ pub async fn sync(
         &toml::to_string_pretty(&locked)?,
         &request_hash(&manifest)?,
     )?;
+    maintenance::bind_lock(&env, &toml::to_string_pretty(&locked)?)?;
     fs::write(
         stage.path().join("toolchain.json"),
         serde_json::to_vec_pretty(&tc)?,

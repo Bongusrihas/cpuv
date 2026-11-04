@@ -45,9 +45,29 @@ pub fn retain(root: &Path) -> Result<Option<String>> {
     if request.is_file() {
         identity.update(&fs::read(&request)?);
     }
-    for name in ["cpuv.lock", ".cpuv/toolchain.json"] {
-        if root.join(name).is_file() {
-            identity.update(&fs::read(root.join(name))?);
+    // A user may already have edited/merged the lock. Retain the installed resolution.
+    let installed = env.join("installed-lock.toml");
+    let lock = if installed.is_file() {
+        let payload = fs::read_to_string(&installed)?;
+        if locks::read(&root.join("cpuv.lock"))
+            .ok()
+            .is_some_and(|p| locks::identity(&p).ok() == locks::identity(&payload).ok())
+        {
+            root.join("cpuv.lock")
+        } else {
+            installed
+        }
+    } else {
+        root.join("cpuv.lock")
+    };
+    let toolchain = if env.join("toolchain-state.json").is_file() {
+        env.join("toolchain-state.json")
+    } else {
+        root.join(".cpuv/toolchain.json")
+    };
+    for path in [&lock, &toolchain] {
+        if path.is_file() {
+            identity.update(&fs::read(path)?);
         }
     }
     let key = identity.finalize().to_hex().to_string();
@@ -71,6 +91,12 @@ pub fn retain(root: &Path) -> Result<Option<String>> {
         }
         if request.is_file() {
             fs::copy(&request, stage.path().join("cpuv.toml"))?;
+        }
+        if lock.is_file() {
+            fs::copy(&lock, stage.path().join("cpuv.lock"))?;
+        }
+        if toolchain.is_file() {
+            fs::copy(&toolchain, stage.path().join("toolchain.json"))?;
         }
         if root.join(".cpuv/bin").is_dir() {
             copy_tree(&root.join(".cpuv/bin"), &stage.path().join("bin"))?;
@@ -130,6 +156,31 @@ pub fn restore(root: &Path, identity: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generations_retain_installed_locks_after_a_user_lock_edit() {
+        let root = tempfile::tempdir().unwrap();
+        let env = root.path().join(".cpuv/env");
+        fs::create_dir_all(&env).unwrap();
+        let installed = "version=1\npackages=[]\n[dependencies]\n";
+        fs::write(env.join("installed-lock.toml"), installed).unwrap();
+        seal(&env).unwrap();
+        fs::write(
+            root.path().join("cpuv.lock"),
+            "version=1\npackages=[]\nrepository='changed'\n[dependencies]\n",
+        )
+        .unwrap();
+        let key = retain(root.path()).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(
+                root.path()
+                    .join(".cpuv/generations")
+                    .join(key)
+                    .join("cpuv.lock")
+            )
+            .unwrap(),
+            installed
+        );
+    }
     #[test]
     fn generation_keeps_the_installed_request_when_the_user_edits_the_manifest() {
         let root = tempfile::tempdir().unwrap();

@@ -1,6 +1,6 @@
 # Troubleshooting cpuv
 
-This guide describes the current 0.0.4 implementation. A source push does not update downloaded executables or existing GitHub release assets.
+This guide covers 0.0.5. Check the executable version before applying advice for a newer build.
 
 ## Check the executable and compiler first
 
@@ -14,7 +14,7 @@ cpuv toolchain
 cpuv doctor
 ```
 
-The first two commands reveal competing installations or shims. Self update replaces the invoked executable; another copy can still be selected by a different terminal. Upgrade older releases to 0.0.4 with:
+The first two commands reveal competing installations or shims. Self update replaces the invoked executable. Use the following command to install the latest published version.
 
 ```powershell
 cpuv self update
@@ -79,6 +79,12 @@ Use the exact name published by the selected provider. cpuv refreshes a cached n
 An error saying a Conan requirement could not be resolved happens before compilation. Check the catalog, version constraint, configured remotes, network access, and the log. It does not establish an ABI or linker incompatibility, and cpuv cannot infer build instructions for a package absent from the selected catalog. See [provider selection](source-builds.md#provider-selection).
 
 CI runs a missing-recipe regression against a synthetic package name, verifies unchanged project/lock/environment receipts, and rechecks a native consumer after rejection. This protects failure handling; it does not add missing recipes to an upstream catalog. To use an unpublished C++ library, provide an upstream/local Conan recipe through `cpuv conan export` and add its full reference, or build/install through the library's documented process. Python wheels and R packages are not interchangeable C++ catalog entries.
+
+## A download stops or a library needs a link selection
+
+`Could not resolve host` is a DNS failure. An HTTP timeout after receiving some bytes is a transfer failure. Check the URL and the underlying Git or HTTP error before investigating compilation. For a slow MSYS2 mirror, select another official UCRT64 mirror during `add` or `lock`. A frozen `sync` uses the repository recorded in the lock. CPUV retries official archive downloads through the mirror service and verifies the original length and digest.
+
+A warning about an ambiguous link module means the package files are installed. For example, Brotli exports separate encoder, decoder and common modules. Set `[link].pkg_config = ["libbrotlienc"]` when the program uses the encoder, then run `cpuv lock`. Use the native build target for libraries that publish a CMake interface. Inspect `.cpuv/env/link-plan.json` to see the selected modules and the installed packages that need a choice.
 
 ## Find the relevant diagnostics
 

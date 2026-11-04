@@ -13,9 +13,73 @@ pub fn location(cache: &Path, payload: &str, request: &str, compiler_identity: &
     )
 }
 
-pub fn store(root: &Path, cli: &Cli, payload: &str, env: &Path, tc: &Toolchain) -> Result<()> {
-    cpuv_core::verify(env)?;
+fn snapshot_lock(path: &Path) -> Result<File> {
+    cpuv_core::object_lock(
+        &path
+            .parent()
+            .context("Artifact has no parent")?
+            .join("locks"),
+        path.file_name()
+            .and_then(|p| p.to_str())
+            .context("Invalid artifact key")?,
+    )
+}
+
+fn verify_snapshot(path: &Path) -> Result<()> {
+    cpuv_core::verify(path)?;
+    cpuv_core::verify(&path.join("env"))?;
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(path.join("artifact.json"))?)?;
+    ensure!(receipt["schema"] == 1, "Unsupported artifact receipt");
+    let metadata: cpuv_relocate::Environment =
+        serde_json::from_slice(&fs::read(path.join("env/manifest.json"))?)?;
+    ensure!(
+        metadata.lock_identity.is_some(),
+        "Legacy artifact requires migration with cpuv sync"
+    );
+    Ok(())
+}
+
+/// Restore a damaged/missing secondary snapshot from an intact installed environment.
+pub fn cached(
+    root: &Path,
+    cli: &Cli,
+    manifest: &Manifest,
+    tc: &Toolchain,
+    payload: &str,
+) -> Result<Option<PathBuf>> {
     let cache = cache_dir(cli)?;
+    let path = location(
+        &cache,
+        payload,
+        &request_hash(manifest)?,
+        &cpuv_toolchain::identity(tc)?.portable_digest()?,
+    );
+    {
+        let _guard = snapshot_lock(&path)?;
+        if path.exists() {
+            if verify_snapshot(&path).is_ok() {
+                return Ok(Some(path));
+            }
+            cpuv_core::quarantine::preserve(&path, &cache.join("quarantine/environments"))?;
+        }
+    }
+    let env = root.join(".cpuv/env");
+    if cpuv_core::verify(&env).is_ok()
+        && let Ok(metadata) = fs::read(env.join("manifest.json"))
+            .map_err(anyhow::Error::from)
+            .and_then(|data| Ok(serde_json::from_slice::<cpuv_relocate::Environment>(&data)?))
+        && metadata.request_hash == request_hash(manifest)?
+        && metadata.lock_identity.as_deref() == Some(cpuv_core::locks::identity(payload)?.as_str())
+    {
+        store(root, cli, payload, &env, tc)?;
+        return Ok(Some(path));
+    }
+    Ok(None)
+}
+
+pub fn verify_deployed(env: &Path) -> Result<cpuv_relocate::Environment> {
+    cpuv_core::verify(env)?;
     let metadata: cpuv_relocate::Environment =
         serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;
     metadata
@@ -23,7 +87,25 @@ pub fn store(root: &Path, cli: &Cli, payload: &str, env: &Path, tc: &Toolchain) 
         .verify()
         .context("Compiler/SDK changed before artifact publication")?;
     cpuv_shim::bundle::verify_runtime(&metadata, env)?;
-    let compiler_identity = cpuv_toolchain::identity(tc)?;
+    Ok(metadata)
+}
+
+fn install_state_format(env: &Path) -> Result<Option<u64>> {
+    let path = env.join("install-state.json");
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?[0]
+            .as_u64()
+            .context("Invalid installation state format")
+            .map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn store(root: &Path, cli: &Cli, payload: &str, env: &Path, tc: &Toolchain) -> Result<()> {
+    let metadata = verify_deployed(env)?;
+    let cache = cache_dir(cli)?;
+    let compiler_identity = cpuv_toolchain::identity_from_verified(tc, &metadata.tool_identity)?;
     ensure!(
         compiler_identity
             .files
@@ -37,9 +119,19 @@ pub fn store(root: &Path, cli: &Cli, payload: &str, env: &Path, tc: &Toolchain) 
         &metadata.request_hash,
         &compiler_identity.portable_digest()?,
     );
+    ensure!(
+        metadata.lock_identity.as_deref() == Some(cpuv_core::locks::identity(payload)?.as_str()),
+        "Artifact environment does not match its dependency lock"
+    );
+    let _guard = snapshot_lock(&destination)?;
     if destination.exists() {
-        cpuv_core::verify(&destination)?;
-        return Ok(());
+        let format = install_state_format(env)?;
+        if verify_snapshot(&destination).is_ok()
+            && install_state_format(&destination.join("env")).is_ok_and(|saved| saved == format)
+        {
+            return Ok(());
+        }
+        cpuv_core::quarantine::preserve(&destination, &cache.join("quarantine/environments"))?;
     }
     fs::create_dir_all(destination.parent().unwrap())?;
     let temporary = tempfile::Builder::new()
@@ -76,8 +168,15 @@ pub fn restore(
     payload: &str,
     source: &Path,
 ) -> Result<tempfile::TempDir> {
-    cpuv_core::verify(source)?;
-    cpuv_core::verify(&source.join("env"))?;
+    // Exported transfers are immutable input too; locking is needed only for shared cache objects.
+    let cache = cache_dir(cli)?;
+    let _guard = if source.parent() == Some(cache.join("environments").as_path()) {
+        Some(snapshot_lock(source)?)
+    } else {
+        None
+    };
+    verify_snapshot(source)?;
+    let compiler_identity = cpuv_toolchain::identity(tc)?;
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(source.join("artifact.json"))?)?;
     ensure!(
@@ -85,7 +184,7 @@ pub fn restore(
         "Artifact does not match the selected lock"
     );
     ensure!(
-        receipt["compiler_identity"] == cpuv_toolchain::identity(tc)?.portable_digest()?,
+        receipt["compiler_identity"] == compiler_identity.portable_digest()?,
         "Offline artifact requires different compiler/SDK contents"
     );
     let old_env = receipt["environment"]
@@ -98,6 +197,10 @@ pub fn restore(
     let new_cache = cache_dir(cli)?;
     let original: cpuv_relocate::Environment =
         serde_json::from_slice(&fs::read(source.join("env/manifest.json"))?)?;
+    ensure!(
+        original.lock_identity.as_deref() == Some(cpuv_core::locks::identity(payload)?.as_str()),
+        "Artifact environment does not match its dependency lock"
+    );
     let mut mappings = vec![
         (PathBuf::from(old_env), new_env.clone()),
         (PathBuf::from(old_cache), new_cache.clone()),
@@ -123,7 +226,7 @@ pub fn restore(
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     )?;
-    mappings.extend(roots.into_iter().zip(cpuv_toolchain::identity(tc)?.roots));
+    mappings.extend(roots.into_iter().zip(compiler_identity.roots.clone()));
     let mut paths = Vec::new();
     for (from, to) in mappings {
         paths.push((cpuv_relocate::portable(&from), cpuv_relocate::portable(&to)));
@@ -142,10 +245,11 @@ pub fn restore(
     for entry in walkdir::WalkDir::new(&env) {
         let entry = entry?;
         if entry.file_type().is_file()
-            && entry
+            && (entry
                 .path()
                 .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("cmake") || e.eq_ignore_ascii_case("pc"))
+                .is_some_and(|e| e.eq_ignore_ascii_case("cmake"))
+                || cpuv_relocate::linking::is_pkg_config_module(entry.path().strip_prefix(&env)?))
         {
             let text = fs::read_to_string(entry.path())?;
             fs::write(entry.path(), replace(text))?;
@@ -158,7 +262,7 @@ pub fn restore(
         "Offline artifact request does not match this manifest"
     );
     let old_identity = metadata.tool_identity;
-    let mut identity = cpuv_toolchain::identity(tc)?;
+    let mut identity = compiler_identity;
     ensure!(
         receipt["compiler_identity"] == identity.portable_digest()?,
         "Compiler/SDK changed during offline restoration"
@@ -196,6 +300,7 @@ pub fn restore(
     metadata.compiler = tc.compiler_path.clone();
     metadata.compiler_bin = tc.compiler_path.parent().unwrap().to_owned();
     metadata.process_environment = tc.environment.clone();
+    maintenance::record_toolchain(&env, tc)?;
     for values in [
         &mut metadata.include_dirs,
         &mut metadata.library_dirs,
@@ -271,6 +376,76 @@ fn rebase(text: &str, paths: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn damaged_snapshots_are_preserved_and_rebuilt_from_the_active_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let compiler = root.path().join("compiler.exe");
+        fs::write(&compiler, "compiler").unwrap();
+        let tc: Toolchain = serde_json::from_value(serde_json::json!({
+            "compiler_path":compiler,"c_compiler":compiler,"driver":"msvc","environment":{},"sysroot":root.path(),
+            "gcc_version":"19.51","lto_compression":[],"abi_hash":"abi","provider":null,"linker":compiler,"observed_abi_options":{},"diagnostics":[],
+            "abi":{"schema":"test","os":"windows","arch":"x86_64","target_triple":"test","compiler_family":"msvc","compiler_abi_major":"195","stdlib":"msvc","stdlib_release":"145","glibcxx_cxx11_abi":"none","crt_runtime":"msvc","thread_model":"win32","exception_model":"seh","cxx_std_ceiling":"default","build_type":"release"}
+        })).unwrap();
+        let manifest: Manifest = toml::from_str("[project]\nname='test'\nversion='1'\nstd='default'\n[toolchain]\ntarget='test'\ncompiler='msvc@19.51'\nabi='msvc'\n").unwrap();
+        let env = root.path().join(".cpuv/env");
+        fs::create_dir_all(&env).unwrap();
+        fs::write(env.join("manifest.json"),serde_json::to_vec(&serde_json::json!({
+            "schema":1,"compiler":compiler,"compiler_bin":root.path(),"abi_hash":"abi","standard":"default","request_hash":request_hash(&manifest).unwrap(),
+            "tool_identity":cpuv_toolchain::identity(&tc).unwrap(),"include_dirs":[],"libraries":[],"defines":[],"cflags":[],"include_map":{}
+        })).unwrap()).unwrap();
+        let payload = "version=1\npackages=[]\n[dependencies]\n";
+        maintenance::bind_lock(&env, payload).unwrap();
+        let cache = root.path().join("cache");
+        let cli = Cli::parse_from([
+            OsString::from("cpuv"),
+            "--cache-dir".into(),
+            cache.clone().into_os_string(),
+            "--offline".into(),
+            "sync".into(),
+        ]);
+        store(root.path(), &cli, payload, &env, &tc).unwrap();
+        let snapshot = location(
+            &cache,
+            payload,
+            &request_hash(&manifest).unwrap(),
+            &cpuv_toolchain::identity(&tc)
+                .unwrap()
+                .portable_digest()
+                .unwrap(),
+        );
+        for path in ["unexpected.txt", "artifact.json", "env/manifest.json"] {
+            fs::write(snapshot.join(path), "damaged").unwrap();
+            assert_eq!(
+                cached(root.path(), &cli, &manifest, &tc, payload).unwrap(),
+                Some(snapshot.clone())
+            );
+            verify_snapshot(&snapshot).unwrap();
+            cpuv_core::verify(&env).unwrap();
+        }
+        assert_eq!(
+            fs::read_dir(cache.join("quarantine/environments"))
+                .unwrap()
+                .count(),
+            3
+        );
+        let guard = snapshot_lock(&snapshot).unwrap();
+        let other = snapshot.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _lock = snapshot_lock(&other).unwrap();
+            sender.send(()).unwrap();
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(guard);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        worker.join().unwrap();
+    }
     #[test]
     fn changed_compiler_is_rejected_before_an_artifact_is_published() {
         let root = tempfile::tempdir().unwrap();

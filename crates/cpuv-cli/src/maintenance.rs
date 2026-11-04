@@ -14,6 +14,17 @@ pub fn verify(root: &Path) -> Result<i32> {
 }
 
 pub fn validate_request(root: &Path, metadata: &cpuv_relocate::Environment) -> Result<()> {
+    cpuv_core::locks::verify_identity(root, metadata.lock_identity.as_deref())?;
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
+    let expected: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join(".cpuv/env/toolchain-state.json"))
+            .context("Legacy toolchain state; run cpuv sync to regenerate it")?,
+    )?;
+    ensure!(
+        saved == expected,
+        "Saved toolchain state disagrees with the verified environment; run cpuv sync to regenerate it"
+    );
     let manifest = read_manifest(root)?;
     ensure!(
         metadata.request_hash == request_hash(&manifest)?,
@@ -41,6 +52,23 @@ pub fn validate_request(root: &Path, metadata: &cpuv_relocate::Environment) -> R
         );
     }
     Ok(())
+}
+
+/// Bind only a fully prepared environment, before sealing and publication.
+pub fn bind_lock(env: &Path, payload: &str) -> Result<()> {
+    let path = env.join("manifest.json");
+    let mut metadata: cpuv_relocate::Environment = serde_json::from_slice(&fs::read(&path)?)?;
+    metadata.lock_identity = Some(cpuv_core::locks::identity(payload)?);
+    cpuv_core::atomic_write(&env.join("installed-lock.toml"), payload.as_bytes())?;
+    cpuv_core::atomic_write(&path, &serde_json::to_vec_pretty(&metadata)?)?;
+    cpuv_core::seal(env)
+}
+
+pub fn record_toolchain(env: &Path, tc: &Toolchain) -> Result<()> {
+    cpuv_core::atomic_write(
+        &env.join("toolchain-state.json"),
+        &serde_json::to_vec_pretty(tc)?,
+    )
 }
 
 pub fn plan(root: &Path) -> Result<i32> {

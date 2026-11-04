@@ -3,7 +3,6 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 
@@ -57,7 +56,7 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
             .to_ascii_lowercase();
         let direct_exe = ext == "exe" && path.parent() == Some(env.join("bin").as_path());
         if ["dll", "pyd"].contains(&ext.as_str()) || direct_exe {
-            let data = fs::read(path)?;
+            let data = cpuv_core::binary::Data::open(path)?;
             let pe = goblin::pe::PE::parse(&data)
                 .with_context(|| format!("Invalid PE binary {}", path.display()))?;
             ensure!(
@@ -96,7 +95,7 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
                     .collect(),
             });
         } else if ext == "a" || ext == "lib" {
-            let data = fs::read(path)?;
+            let data = cpuv_core::binary::Data::open(path)?;
             if !data.starts_with(b"!<arch>\n") && !data.starts_with(b"!<thin>\n") {
                 let relative = path.strip_prefix(env)?;
                 let library_payload = relative.parent().is_some_and(|parent| {
@@ -178,4 +177,53 @@ pub fn environment_for_runtime(env: &Path, arch: &str, runtime: &str) -> Result<
         "packaged_symbol_edges_checked": checked_symbols, "external_dlls_not_proven": external,
         "not_proven": ["CPU instruction requirements", "structure packing", "library feature macros", "debug iterator ABI", "RTTI/exceptions across interfaces", "external and ordinal exports", "LTO plugin compatibility"]}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    fn archive(machine: u16) -> Vec<u8> {
+        let mut output = b"!<arch>\n".to_vec();
+        output.extend_from_slice(
+            format!(
+                "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                "fixture.obj/", "0", "0", "0", "644", "20"
+            )
+            .as_bytes(),
+        );
+        let mut member = [0u8; 20];
+        member[..2].copy_from_slice(&machine.to_le_bytes());
+        output.extend_from_slice(&member);
+        output
+    }
+    #[test]
+    fn nested_archives_receive_the_same_architecture_checks_as_root_libraries() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("lib")).unwrap();
+        fs::create_dir_all(root.path().join("full_deploy/host/fixture/1/lib")).unwrap();
+        fs::write(root.path().join("lib/root.a"), archive(0x8664)).unwrap();
+        let nested = root
+            .path()
+            .join("full_deploy/host/fixture/1/lib/nested.lib");
+        fs::write(&nested, archive(0x8664)).unwrap();
+        fs::write(root.path().join("LICENSE.LIB"), "license text").unwrap();
+        let report = environment_for_runtime(root.path(), "x86_64", "ucrt").unwrap();
+        assert_eq!(report["library_archives"], 2);
+        assert_eq!(report["coff_members_checked"], 2);
+        assert_eq!(
+            report["non_archive_files_skipped"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::write(&nested, archive(0x14c)).unwrap();
+        assert!(
+            environment_for_runtime(root.path(), "x86_64", "ucrt")
+                .unwrap_err()
+                .to_string()
+                .contains("architecture mismatch")
+        );
+    }
 }

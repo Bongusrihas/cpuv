@@ -1,5 +1,7 @@
 # 15 · Error handling and operations
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Security](09_SECURITY_AND_TRUST_MODEL.md) · [Known issues](19_KNOWN_ISSUES_AND_TECHNICAL_DEBT.md)
 
 ## Error conventions and observability

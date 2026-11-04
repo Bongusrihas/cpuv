@@ -99,6 +99,8 @@ $manifestPath=Join-Path $msbuild 'cpuv.toml'
 system="msbuild"
 project="consumer.vcxproj"
 test_arguments=["/t:RunTests"]
+[runtime.environment]
+CPUV_MSBUILD_FIXTURE="verified"
 '@ | Add-Content -LiteralPath (Join-Path $msbuild 'cpuv.toml') -Encoding ascii
 $vendor=Join-Path $msbuild 'vendor'
 New-Item -ItemType Directory -Path $vendor | Out-Null
@@ -125,10 +127,11 @@ libraries=["msbuild_fixture"]
 Invoke-Cpuv $msbuild source add msbuild-fixture $spec
 @'
 #include <value.h>
+#include <cstdlib>
 #if _MSVC_LANG < 202002L
 #error CPUv did not propagate the selected C++20 profile through MSBuild
 #endif
-int main(){return msbuild_fixture_value()==72?0:1;}
+int main(){return msbuild_fixture_value()==72 && std::getenv("CPUV_MSBUILD_FIXTURE")?0:1;}
 '@ | Set-Content -LiteralPath (Join-Path $msbuild 'main.cpp') -Encoding ascii
 Invoke-Cpuv $msbuild test
 if (Test-Path -LiteralPath (Join-Path $msbuild 'out')) {throw 'MSBuild wrote outputs into the source tree'}

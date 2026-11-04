@@ -1,5 +1,7 @@
 # 18 · Contributor and extension manual
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [File guide](05_REPOSITORY_AND_FILE_BY_FILE_GUIDE.md) · [Decisions](13_ENGINEERING_DECISIONS_AND_TRADEOFFS.md)
 
 ## Development workflow

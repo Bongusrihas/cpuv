@@ -1,5 +1,6 @@
 //! Discover and fingerprint the user's native Windows GCC installation.
 use anyhow::{Context, Result, bail, ensure};
+use cpuv_core::process::CommandOutput as _;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,13 +21,40 @@ pub fn microsoft_toolset(tc: &Toolchain) -> Result<(String, String)> {
 }
 
 pub fn identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
-    capture_identity(tc, false)
+    capture_identity(tc, false, None)
 }
 pub fn legacy_identity(tc: &Toolchain) -> Result<cpuv_core::ToolIdentity> {
-    capture_identity(tc, true)
+    capture_identity(tc, true, None)
 }
-fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdentity> {
+/// Reuse hashes already verified in this operation. The caller must verify again before publication.
+pub fn identity_from_verified(
+    tc: &Toolchain,
+    verified: &cpuv_core::ToolIdentity,
+) -> Result<cpuv_core::ToolIdentity> {
+    capture_identity(tc, false, Some(verified))
+}
+fn capture_identity(
+    tc: &Toolchain,
+    legacy: bool,
+    verified: Option<&cpuv_core::ToolIdentity>,
+) -> Result<cpuv_core::ToolIdentity> {
+    let capture = |files: std::collections::BTreeSet<PathBuf>,
+                   roots: Vec<PathBuf>|
+     -> Result<cpuv_core::ToolIdentity> {
+        if let Some(verified) = verified {
+            let files = files.into_iter().map(|path| {
+                let hash = verified.files.get(&path).with_context(|| format!("Compiler input {} is absent from the verified identity; run cpuv sync", path.display()))?.clone();
+                Ok((path, hash))
+            }).collect::<Result<_>>()?;
+            Ok(cpuv_core::ToolIdentity { files, roots })
+        } else {
+            cpuv_core::ToolIdentity::capture_with_roots(files, roots)
+        }
+    };
     let mut files = std::collections::BTreeSet::from([tc.compiler_path.clone()]);
+    if !legacy {
+        files.insert(tc.c_compiler.clone());
+    }
     let mut roots = Vec::new();
     if let Some(bin) = tc.compiler_path.parent() {
         for entry in std::fs::read_dir(bin)? {
@@ -62,6 +90,16 @@ fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdent
     }
     if tc.driver == "msvc" {
         files.insert(PathBuf::from(&tc.linker));
+        if !legacy && let Some(path) = tc.environment.get("PATH") {
+            for directory in std::env::split_paths(&std::ffi::OsString::from(path)) {
+                for tool in ["rc.exe", "mt.exe"] {
+                    let tool = directory.join(tool);
+                    if tool.is_file() {
+                        files.insert(tool);
+                    }
+                }
+            }
+        }
         for variable in ["INCLUDE", "LIB"] {
             if let Some(value) = tc.environment.get(variable) {
                 for directory in std::env::split_paths(&std::ffi::OsString::from(value)) {
@@ -77,12 +115,12 @@ fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdent
                 }
             }
         }
-        return cpuv_core::ToolIdentity::capture_with_roots(files, roots);
+        return capture(files, roots);
     }
     for tool in ["cc1", "cc1plus", "collect2", "lto1", "as", "ld", "ar"] {
         if let Ok(output) = compiler_command(&tc.compiler_path)?
             .arg(format!("-print-prog-name={tool}"))
-            .output()
+            .bounded_output()
             && output.status.success()
         {
             let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -94,7 +132,7 @@ fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdent
     for name in ["libstdc++.a", "libgcc.a", "crt2.o"] {
         let output = compiler_command(&tc.compiler_path)?
             .arg(format!("-print-file-name={name}"))
-            .output()?;
+            .bounded_output()?;
         let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
         if path.is_file() {
             files.insert(driver_path(path.canonicalize()?));
@@ -113,11 +151,27 @@ fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdent
             }
         }
     }
-    // SDK headers affect ABI even when driver and linker executables are unchanged.
-    for directory in [
+    // SDK and GCC-private headers affect ABI even when driver/linker are unchanged.
+    let mut include_roots = vec![
         tc.sysroot.join("include"),
         tc.sysroot.join(&tc.abi.target_triple).join("include"),
-    ] {
+    ];
+    if !legacy {
+        for name in ["include", "include-fixed"] {
+            let output = compiler_command(&tc.compiler_path)?
+                .arg(format!("-print-file-name={name}"))
+                .bounded_output()?;
+            if output.status.success() {
+                let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+                if path.is_dir() {
+                    include_roots.push(driver_path(path.canonicalize()?));
+                }
+            }
+        }
+    }
+    include_roots.sort();
+    include_roots.dedup();
+    for directory in include_roots {
         if directory.is_dir() {
             roots.push(directory.clone());
             for entry in walkdir::WalkDir::new(directory) {
@@ -128,7 +182,7 @@ fn capture_identity(tc: &Toolchain, legacy: bool) -> Result<cpuv_core::ToolIdent
             }
         }
     }
-    cpuv_core::ToolIdentity::capture_with_roots(files, roots)
+    capture(files, roots)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -543,7 +597,9 @@ pub fn probe_with_flags(
     {
         return msvc::probe(path, flags);
     }
-    let target = compiler_command(&path)?.arg("-dumpmachine").output()?;
+    let target = compiler_command(&path)?
+        .arg("-dumpmachine")
+        .bounded_output()?;
     ensure!(target.status.success(), "Could not query the GCC target");
     let mut command = compiler_command(&path)?;
     command.args(flags);
@@ -556,7 +612,7 @@ pub fn probe_with_flags(
     let mut output = command
         .arg("-")
         .stdin(Stdio::null())
-        .output()
+        .bounded_output()
         .context("Executing GCC probe")?;
     let private_headers = output.status.success();
     if !private_headers {
@@ -565,7 +621,7 @@ pub fn probe_with_flags(
             .args(flags)
             .args(["-v", "-dM", "-E", "-x", "c++", "-"])
             .stdin(Stdio::null())
-            .output()?;
+            .bounded_output()?;
     }
     ensure!(
         output.status.success(),
@@ -598,7 +654,7 @@ pub fn probe_with_flags(
                 "-",
             ])
             .stdin(Stdio::null())
-            .output()?
+            .bounded_output()?
             .status
             .success()
         {
@@ -607,7 +663,10 @@ pub fn probe_with_flags(
         }
     }
     tc.abi_hash = blake3::hash(&serde_json::to_vec(&tc.abi)?).to_hex()[..32].to_owned();
-    if let Ok(output) = compiler_command(&path)?.arg("-print-prog-name=ld").output() {
+    if let Ok(output) = compiler_command(&path)?
+        .arg("-print-prog-name=ld")
+        .bounded_output()
+    {
         let linker = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !linker.is_empty() {
             tc.linker = linker;
@@ -637,7 +696,7 @@ pub fn doctor(tc: &Toolchain, flags: &[std::ffi::OsString]) -> Result<serde_json
     }
     let output = compile
         .current_dir(temporary.path())
-        .output()
+        .bounded_output()
         .context("Starting the compiler/linker check")?;
     ensure!(
         output.status.success(),
@@ -658,7 +717,7 @@ pub fn doctor(tc: &Toolchain, flags: &[std::ffi::OsString]) -> Result<serde_json
         let mut paths = vec![tc.compiler_path.parent().unwrap().to_owned()];
         if let Some(path) = std::env::var_os("PATH") { paths.extend(std::env::split_paths(&path)); }
         std::env::join_paths(paths)?
-    }).current_dir(temporary.path()).output().context("The compiled program cannot run on this Windows host; check target architecture and runtime DLL availability")?;
+    }).current_dir(temporary.path()).bounded_output().context("The compiled program cannot run on this Windows host; check target architecture and runtime DLL availability")?;
     ensure!(
         output.status.success() && output.stdout == b"cpuv-toolchain-ok",
         "Compiled program failed to run (status {}); check architecture, runtime DLLs and selected ABI",

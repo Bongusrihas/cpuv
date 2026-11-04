@@ -1,6 +1,6 @@
 # Community catalog installation
 
-For the unreleased declarative archive/Git/local/SDK source adapters, provider-qualified search, portable locks and offline transfers, see [Phase 2](phase2.md). This page describes the catalog interfaces shared with 0.0.4.
+For declarative archive, Git, local and SDK source adapters, provider-qualified search, portable locks and offline transfers, see [Phase 2](phase2.md). This page describes the catalog interfaces.
 
 cpuv uses compatible MSYS2 UCRT64 or MINGW64 packages first. A missing package, another native MinGW GCC profile, custom flags, or --catalog selects ConanCenter for the entire environment. There is no cpuv library recipe file to create.
 

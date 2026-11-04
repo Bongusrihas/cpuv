@@ -1,5 +1,7 @@
 # 02 · Requirements and domain model
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Storage schemas](07_DATA_MODEL_AND_STORAGE.md)
 
 This is a reconstruction of observable requirements, not an original signed requirements specification. **Fact** means source-supported behavior. **Inference** means an engineering interpretation. Original user conversations are not a versioned requirements artifact in this repository.

@@ -2,11 +2,11 @@
 
 A C++ dependency, build, and run workflow for Windows.
 
-**Version 0.0.4 · Windows · Apache-2.0**
+**Version 0.0.5 · Windows · Apache-2.0**
 
 cpuv manages native C++ dependencies, prepares a project environment, and compiles and runs your code with one command. Downloaded packages live in a shared cache. Generated programs and compiler artifacts stay in the hidden .cpuv directory.
 
-The source tree also contains the **unreleased Phase 2** source-package, compiler provisioning, build-adapter, runtime, offline-transfer and cache-management work. See the [Phase 2 guide and acceptance gate](docs/phase2.md). Published 0.0.4 downloads retain their released behavior until a new release is built and published.
+Version 0.0.5 includes declarative source packages, compiler provisioning, native build adapters, development transfers and cache management. See the [Phase 2 guide](docs/phase2.md) and [0.0.5 release notes](docs/release-notes/v0.0.5.md).
 
 The [Phase 3 guide](docs/phase3.md) covers the expanded native consumer/lifecycle matrix, dependency audits and license inventory, release provenance, performance evidence, and desktop/ARM64 verification boundaries.
 
@@ -27,6 +27,10 @@ The [Phase 3 guide](docs/phase3.md) covers the expanded native consumer/lifecycl
 - Automatic compilation and execution, without EXE or DLL files scattered across your source directory.
 - Exact package names from upstream catalogs, with no cpuv library aliases or named linker defaults.
 
+The [0.0.5 maintenance review](docs/maintenance-review.md) covers exact installed lock validation, cache repair, asset and build fixes, and performance changes. Run `cpuv sync` to regenerate the sealed metadata for an older locked environment.
+
+See the [live project matrix](docs/project-matrix.md) for the repository downloads, isolated installs, linker findings and ten-library consumer test.
+
 ## Requirements
 
 - Windows 10 or newer (x64) and a selected native C++ compiler. GCC, MSVC and GNU-style Clang are covered by retained integration tests.
@@ -41,7 +45,7 @@ Phase 1 acceptance is reproducible with `scripts/test-phase1.ps1 -Compiler C:\pa
 
 ## Compiler profiles, builds and runtime exports
 
-The additions below are included in version 0.0.4. Their supported boundaries are documented in [compatibility](docs/compatibility.md).
+Compiler profiles, MSVC, GNU-style Clang, CMake/CTest and the vcpkg adapter were introduced in 0.0.4. See [compatibility](docs/compatibility.md) for the tested combinations.
 
 ```powershell
 cpuv --compiler 'C:\path\to\cl.exe' profile create msvc
@@ -69,7 +73,7 @@ cpuv build
 cpuv test
 ```
 
-The vcpkg adapter bootstraps the official tool from a pinned Git revision, downloads declared build tools, and preserves native CMake interfaces. Use `find_package()` and imported targets in `CMakeLists.txt`; direct `cpuv run cl` dependency injection is unavailable for vcpkg. The tested target triplet is `x64-windows`, with the x64 Windows host triplet. `x64-windows-static-md` is also accepted and remains experimental pending its full native matrix. Configure `[vcpkg].revision`, `.triplet`, `.host_triplet`, `.features` and `.default_features` in `cpuv.toml`. `--offline sync` verifies an intact vcpkg environment; offline rebuilding or repairing a missing vcpkg installation tree is not yet supported.
+The vcpkg adapter bootstraps the official tool from a pinned Git revision, downloads declared build tools, and preserves native CMake interfaces. Use `find_package()` and imported targets in `CMakeLists.txt`. The tested target triplet is `x64-windows`, with the x64 Windows host triplet. `x64-windows-static-md` remains experimental. Configure `[vcpkg].revision`, `.triplet`, `.host_triplet`, `.features` and `.default_features` in `cpuv.toml`. `--offline sync` can restore a missing CPUV environment from a verified deployed snapshot. Rebuilding the provider tree requires the provider's own cached inputs.
 
 Conan dependency details accept upstream options without per-library engine rules:
 
@@ -120,7 +124,7 @@ cpuv uninstall
 
 The command removes the invoked executable, matching copies in cpuv's standard per-user install locations, and recognized cpuv helpers. Dedicated installation-directory entries are removed from the user PATH. Shared directories such as .local/bin stay on PATH when other files/tools remain. Project source, .cpuv environments, GCC, and dependency caches are preserved. A custom or portable invocation affects that installation only; different binaries in other locations are reported and preserved. Open a new terminal afterward. Use cpuv rm PACKAGE to remove a project dependency instead.
 
-Self update downloads the latest published stable GitHub release, verifies its checksum and executable version, and safely replaces the invoked Windows executable. It requires no Rust or PowerShell. Use --version 0.0.4 to select a release, or --force to reinstall the same version or explicitly request a downgrade. Other copies of cpuv on disk are not updated. Project environments and dependency caches are preserved. A separate compiler-shim download is unnecessary.
+Self update downloads the latest published stable GitHub release, verifies its checksum and executable version, and safely replaces the invoked Windows executable. It requires no Rust or PowerShell. Use `--version 0.0.5` to select that release or `--force` for a reinstall or an explicit downgrade. The invoked executable includes the compiler shim.
 
 After a maintainer replaces the assets of an existing release, install that updated build with:
 
@@ -211,7 +215,9 @@ pkg_config = ["Qt6Widgets", "fmt"]
 # flags = ["-pthread"]
 ~~~
 
-Explicit selections replace automatic module selection. Automatic selection uses a module owned by the direct package whose name matches the package, or its sole exported module. A package with ambiguous or missing compiled-library exports requires explicit configuration; there are no library-specific defaults. Source packages include static/private pkg-config interfaces when the provider declares static linkage. CMake target semantics are consumed through the native build integration. Run cpuv lock after changing link configuration. See .cpuv/env/link-plan.json for the actual selected modules and libraries. Older locks retain their recorded graph until cpuv lock resolves it again.
+Explicit selections replace automatic module selection. Without a selection, CPUV links a direct package's matching pkg-config module or its sole exported module. A compiled package with missing or ambiguous metadata still installs. CPUV reports that it needs an explicit link selection before managed compiler commands will link it. Source packages include static/private pkg-config interfaces when the provider declares static linkage. CMake projects select their imported targets in `CMakeLists.txt`.
+
+For example, a project can install ten packages but set `[link].pkg_config = ["zlib", "expat"]` when its program uses only those two. All ten remain installed and locked. The managed compiler receives the selected modules and their link dependencies. The Windows loader follows the executable's DLL imports, and `cpuv bundle` packages that runtime closure. Run `cpuv lock` after editing the selection and inspect `.cpuv/env/link-plan.json` to see what will be linked.
 
 If an older manifest or lock relied on a removed alias or automatically added sibling library, select the exact package names and run cpuv lock to regenerate the resolution. Existing user projects are not rewritten during the cpuv application update.
 
@@ -384,7 +390,7 @@ Performance depends on the package graph, cache verification, disk, network, and
 
 ## Scope and security
 
-Version 0.0.4 uses MSYS2 indexes, Conan metadata or a pinned vcpkg registry. The MSYS2 path verifies archive SHA-256 checksums and validates extraction paths without executing package hooks. Conan executes upstream Python recipes and build code with your permissions, even when it downloads a binary. Its downloader and cache formats are owned by Conan; cpuv checks Conan cache integrity before and after installation and inventories deployed output. Explicit host tooling uses pacman normally. Package signatures, sandboxed/hermetic builds, and universal ABI conversion are not implemented. Use trusted catalogs and upstream sources. Managed commands expand response files with bounds/cycle checks and use response files for long command lines. Application bundling records its explicit assets and import closure; full offline development bundles are pending.
+CPUv uses MSYS2 indexes, Conan metadata or a pinned vcpkg registry. The MSYS2 path verifies archive SHA-256 checksums and validates extraction paths without executing package hooks. A failed archive transfer from an official MSYS2 repository can retry through the official mirror service using the same indexed size and digest. Conan executes upstream recipes and build code with your permissions, even when it downloads a binary. CPUv checks Conan cache integrity and inventories deployed output. Explicit host tooling uses pacman normally. Managed commands use bounded response file expansion and support long command lines. Application bundles carry the import closure and explicit assets. [Development transfers](docs/phase2.md) carry the locked environment and supported cached inputs for offline use.
 
 ## Credits and license
 
@@ -392,6 +398,6 @@ Version 0.0.4 uses MSYS2 indexes, Conan metadata or a pinned vcpkg registry. The
 
 **Co-authors:** Gemini 4 argon and GPT-6 sol
 
-**Version:** 0.0.4
+**Version:** 0.0.5
 
 Licensed under [Apache-2.0](LICENSE). Third-party compilers and packages retain their own licenses. See [AUTHORS.md](AUTHORS.md) and [NOTICE](NOTICE).

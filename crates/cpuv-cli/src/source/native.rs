@@ -213,6 +213,60 @@ pub(crate) fn project_copy(source: &Path, destination: &Path) -> Result<()> {
     copy_snapshot(source, destination, &files(source)?)
 }
 
+/// Reconcile only files copied from the project; build-generated outputs retain ownership.
+pub(crate) fn sync_project_copy(source: &Path, destination: &Path, receipt: &Path) -> Result<()> {
+    let current = files(source)?;
+    let previous: BTreeMap<String, String> = if receipt.exists() {
+        cpuv_core::regular(receipt)?;
+        serde_json::from_slice(&fs::read(receipt)?)?
+    } else {
+        if destination.exists() {
+            // Legacy trees have no ownership record. Preserve them rather than guessing.
+            cpuv_core::quarantine::preserve(
+                destination,
+                &destination
+                    .parent()
+                    .context("Missing build parent")?
+                    .join("source-backups"),
+            )?;
+        }
+        BTreeMap::new()
+    };
+    // Validate all deletions/collisions before mutating the copied tree.
+    for (relative, digest) in &previous {
+        cpuv_core::contained(destination, Path::new(relative))?;
+        let target = destination.join(relative);
+        if !current.contains_key(relative) && target.exists() {
+            cpuv_core::regular(&target)?;
+            ensure!(
+                archive::digest(&target)? == *digest,
+                "Copied source {} was modified by a build; preserve or move it before removing its project source",
+                target.display()
+            );
+        }
+    }
+    for (relative, digest) in &current {
+        cpuv_core::contained(destination, Path::new(relative))?;
+        let target = destination.join(relative);
+        if target.exists() && !previous.contains_key(relative) {
+            cpuv_core::regular(&target)?;
+            ensure!(
+                archive::digest(&target)? == *digest,
+                "Project source conflicts with a build-generated file: {}",
+                target.display()
+            );
+        }
+    }
+    for relative in previous.keys().filter(|p| !current.contains_key(*p)) {
+        let target = destination.join(relative);
+        if target.exists() {
+            fs::remove_file(target)?;
+        }
+    }
+    copy_snapshot(source, destination, &current)?;
+    cpuv_core::atomic_write(receipt, &serde_json::to_vec_pretty(&current)?)
+}
+
 fn validate_digest(value: &str) -> Result<()> {
     ensure!(
         value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit()),
@@ -560,7 +614,7 @@ async fn snapshot(root: &Path, cli: &Cli, spec: &Spec, base: &Path, log: &Path) 
             )?;
             let head = git_command(&checkout)
                 .args(["rev-parse", "HEAD"])
-                .output()?;
+                .bounded_output()?;
             ensure!(
                 head.status.success()
                     && String::from_utf8_lossy(&head.stdout)
@@ -726,6 +780,33 @@ pub fn verify_local_inputs(root: &Path, manifest: &Manifest) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_reconciliation_removes_deleted_inputs_but_preserves_generated_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("project");
+        let target = root.path().join("build/source");
+        let receipt = root.path().join("build/source-files.json");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(source.join("old.cpp"), "old input").unwrap();
+        sync_project_copy(&source, &target, &receipt).unwrap();
+        fs::write(target.join("generated.obj"), "build output").unwrap();
+        fs::rename(source.join("old.cpp"), source.join("new.cpp")).unwrap();
+        sync_project_copy(&source, &target, &receipt).unwrap();
+        assert!(!target.join("old.cpp").exists());
+        assert!(target.join("new.cpp").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join("generated.obj")).unwrap(),
+            "build output"
+        );
+        fs::write(target.join("new.cpp"), "build modified input").unwrap();
+        fs::rename(source.join("new.cpp"), source.join("renamed.cpp")).unwrap();
+        assert!(sync_project_copy(&source, &target, &receipt).is_err());
+        assert_eq!(
+            fs::read_to_string(target.join("new.cpp")).unwrap(),
+            "build modified input"
+        );
+    }
     #[test]
     fn snapshot_identity_covers_file_names_and_content() {
         let root = tempfile::tempdir().unwrap();

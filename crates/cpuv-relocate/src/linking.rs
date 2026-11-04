@@ -26,6 +26,19 @@ pub struct PackageFiles {
     pub static_link: bool,
 }
 
+/// A .pc suffix alone also matches files such as Perl's Win32API data.
+pub fn is_pkg_config_module(relative: &Path) -> bool {
+    relative
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pc"))
+        && relative.parent().is_some_and(|directory| {
+            directory.as_os_str().is_empty()
+                || directory
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("pkgconfig"))
+        })
+}
+
 #[derive(Clone)]
 struct Module {
     variables: BTreeMap<String, String>,
@@ -96,7 +109,7 @@ fn words(module: &Module, field: &str) -> Result<Vec<String>> {
 
 fn requirement_modules(
     module: &Module,
-    modules: &BTreeMap<String, Module>,
+    modules: &BTreeMap<String, (Module, &PackageFiles)>,
     private: bool,
 ) -> Result<Vec<String>> {
     let text = expand(
@@ -130,7 +143,7 @@ fn requirement_modules(
         let name = capture.get(1).unwrap().as_str();
         let operator = capture.get(2).map_or("", |value| value.as_str());
         let required = capture.get(3).map_or("", |value| value.as_str());
-        let dependency = modules.get(name).with_context(|| format!("pkg-config Requires references missing module {name}; add its package to the resolved graph"))?;
+        let (dependency, _) = modules.get(name).with_context(|| format!("pkg-config Requires references missing module {name}; add its package to the resolved graph"))?;
         if !operator.is_empty() {
             let actual = dependency
                 .fields
@@ -160,20 +173,73 @@ fn requirement_modules(
 }
 
 fn relative(env: &Path, value: &str) -> Result<String> {
-    let value = ["/ucrt64/", "/mingw64/"]
+    let value = ["/ucrt64/", "/mingw64/", "/mingw32/"]
         .iter()
         .find_map(|prefix| value.strip_prefix(prefix))
-        .map_or_else(|| PathBuf::from(value), |tail| env.join(tail));
-    let resolved = value
-        .canonicalize()
-        .with_context(|| format!("Metadata directory does not exist: {}", value.display()))?;
+        .unwrap_or(value);
+    // Relative directories in package metadata are relative to its installed prefix.
     let root = env.canonicalize()?;
+    let original = env.join(value);
+    let mut resolved = original.canonicalize();
+    if !resolved.as_ref().is_ok_and(|path| path.starts_with(&root))
+        && value.as_bytes().get(1..3) == Some(b":/")
+    {
+        // Some upstream .pc files embed a builder's MSYS2 installation path.
+        let lower = value.to_ascii_lowercase();
+        if let Some((start, prefix)) = ["/msys64/ucrt64/", "/msys64/mingw64/", "/msys64/mingw32/"]
+            .into_iter()
+            .find_map(|prefix| lower.rfind(prefix).map(|start| (start, prefix)))
+        {
+            resolved = env.join(&value[start + prefix.len()..]).canonicalize();
+        }
+    }
+    let resolved = resolved
+        .with_context(|| format!("Metadata directory does not exist: {}", original.display()))?;
     ensure!(
         resolved.starts_with(&root),
         "Package metadata directory escapes the managed environment: {}",
-        value.display()
+        original.display()
     );
     Ok(portable(resolved.strip_prefix(root)?))
+}
+
+fn gnu_exact_archive(
+    env: &Path,
+    directories: &[String],
+    package: &PackageFiles,
+    library: &str,
+) -> Option<String> {
+    if library.is_empty()
+        || !library
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))
+    {
+        return None;
+    }
+    let filename = format!("{library}.a");
+    if !package.files.iter().any(|file| {
+        file.file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&filename))
+            && file
+                .parent()
+                .is_some_and(|parent| directories.iter().any(|dir| parent == Path::new(dir)))
+    }) {
+        return None;
+    }
+    let conventional = [
+        format!("lib{library}.dll.a"),
+        format!("{library}.dll.a"),
+        format!("lib{library}.a"),
+        format!("{library}.lib"),
+        format!("lib{library}.dll"),
+        format!("{library}.dll"),
+    ];
+    (!directories.iter().any(|dir| {
+        conventional
+            .iter()
+            .any(|name| env.join(dir).join(name).is_file())
+    }))
+    .then(|| format!("-l:{filename}"))
 }
 
 fn unique(values: &mut Vec<String>, value: String) {
@@ -212,10 +278,7 @@ pub fn apply_for(
     let mut owners = BTreeMap::<String, Vec<String>>::new();
     for package in packages {
         for file in &package.files {
-            if file
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("pc"))
-            {
+            if is_pkg_config_module(file) {
                 let name = file.file_stem().unwrap().to_string_lossy().into_owned();
                 ensure!(
                     !modules.contains_key(&name),
@@ -224,12 +287,13 @@ pub fn apply_for(
                 if package.static_link {
                     static_modules.insert(name.clone());
                 }
-                modules.insert(name.clone(), read(&env.join(file))?);
+                modules.insert(name.clone(), (read(&env.join(file))?, package));
                 owners.entry(package.name.clone()).or_default().push(name);
             }
         }
     }
     let mut selected = selection.pkg_config.clone();
+    let mut packages_needing_link_selection = BTreeMap::new();
     if selected.is_empty() && selection.libraries.is_empty() && selection.flags.is_empty() {
         for root in roots {
             let name = cpuv_solver::split_requirement(root).0;
@@ -259,11 +323,17 @@ pub fn apply_for(
                         name.ends_with(".a") || name.ends_with(".lib")
                     })
                 });
-            ensure!(
-                !compiled,
-                "Package {base} has no unambiguous link module. Set [link].pkg_config or [link].libraries explicitly; available modules: {}",
-                exported.join(", ")
-            );
+            if compiled {
+                eprintln!(
+                    "Package {base} has no unambiguous link module. To link it, set [link].pkg_config or [link].libraries explicitly. Available modules: {}",
+                    if exported.is_empty() {
+                        "(none)".into()
+                    } else {
+                        exported.join(", ")
+                    }
+                );
+                packages_needing_link_selection.insert(base.to_owned(), exported);
+            }
         }
     }
     let mut pending: Vec<_> = selected.iter().rev().cloned().collect();
@@ -274,7 +344,7 @@ pub fn apply_for(
         if !visited.insert(name.clone()) {
             continue;
         }
-        let module = modules.get(&name).with_context(|| {
+        let (module, _) = modules.get(&name).with_context(|| {
             format!("Selected pkg-config module {name} is not in the resolved packages")
         })?;
         let dependencies = requirement_modules(module, &modules, static_modules.contains(&name))?;
@@ -308,8 +378,9 @@ pub fn apply_for(
     ordered.extend(discovered.into_iter().filter(|n| incoming.contains_key(n)));
     metadata.link_items.clear();
     metadata.link_model = 3;
+    let mut archive_operands = Vec::new();
     for name in &ordered {
-        let module = &modules[name];
+        let (module, package) = &modules[name];
         for token in words(module, "Cflags")? {
             if let Some(path) = token.strip_prefix("-I") {
                 unique(&mut metadata.include_dirs, relative(env, path)?);
@@ -323,16 +394,28 @@ pub fn apply_for(
         if static_modules.contains(name) {
             libs.extend(words(module, "Libs.private")?);
         }
-        for token in libs {
-            if let Some(path) = token.strip_prefix("-L") {
-                unique(&mut metadata.library_dirs, relative(env, path)?);
-            } else if let Some(lib) = token.strip_prefix("-l") {
+        for path in libs.iter().filter_map(|token| token.strip_prefix("-L")) {
+            unique(&mut metadata.library_dirs, relative(env, path)?);
+        }
+        for token in libs.into_iter().filter(|token| !token.starts_with("-L")) {
+            if let Some(lib) = token.strip_prefix("-l") {
                 unique(&mut metadata.libraries, lib.into());
+                if metadata.driver == "gnu" {
+                    archive_operands.push((metadata.link_items.len(), *package));
+                }
                 metadata.link_items.push(token);
             } else {
                 unique(&mut metadata.link_flags, token.clone());
                 metadata.link_items.push(token);
             }
+        }
+    }
+    for (index, package) in archive_operands {
+        let item = &mut metadata.link_items[index];
+        if let Some(library) = item.strip_prefix("-l")
+            && let Some(exact) = gnu_exact_archive(env, &metadata.library_dirs, package, library)
+        {
+            *item = exact;
         }
     }
     for lib in &selection.libraries {
@@ -358,6 +441,7 @@ pub fn apply_for(
             "authority": "resolved package ownership, pkg-config Libs/Requires, explicit project link configuration",
             "source_include_scanning": false,
             "selected_modules": selected,
+            "packages_needing_link_selection": packages_needing_link_selection,
             "module_graph": ordered,
             "libraries": metadata.libraries,
             "ordered_link_items": metadata.link_items,
@@ -434,6 +518,57 @@ mod tests {
     }
 
     #[test]
+    fn installed_library_without_a_module_does_not_prevent_linking_other_roots() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("selected.pc"),
+            "Version: 1\nLibs: -lselected\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("lib/perl5")).unwrap();
+        fs::write(
+            root.path().join("lib/perl5/cFile.pc"),
+            "sub CREATE_ALWAYS () { 2 }\n",
+        )
+        .unwrap();
+        let packages = [
+            PackageFiles {
+                name: "selected".into(),
+                files: vec!["selected.pc".into()],
+                static_link: false,
+            },
+            PackageFiles {
+                name: "optional".into(),
+                files: vec!["lib/liboptional.a".into(), "lib/perl5/cFile.pc".into()],
+                static_link: false,
+            },
+        ];
+        let mut metadata: Environment = serde_json::from_value(serde_json::json!({
+            "schema":1,"compiler":"g++","compiler_bin":".","abi_hash":"test",
+            "standard":"default","include_dirs":[],"libraries":[],"defines":[],
+            "cflags":[],"include_map":{},"link_model":3,"dependency_origin":"source"
+        }))
+        .unwrap();
+        apply_for(
+            root.path(),
+            &mut metadata,
+            &packages,
+            &["optional".into(), "selected".into()],
+            &Selection::default(),
+            "",
+        )
+        .unwrap();
+        let plan: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.path().join("link-plan.json")).unwrap()).unwrap();
+        assert_eq!(
+            plan["packages_needing_link_selection"]["optional"],
+            serde_json::json!([])
+        );
+        assert_eq!(metadata.link_items, ["-lselected"]);
+        assert!(metadata.managed_binaries);
+    }
+
+    #[test]
     fn diamond_consumers_precede_shared_provider() {
         let args = compile_plan(
             &[
@@ -500,5 +635,50 @@ mod tests {
         assert_eq!(args[3], "-L");
         assert!(args[4].contains("metadata with spaces"));
         assert_eq!(args[5], "-lx");
+    }
+
+    #[test]
+    fn resolves_package_relative_and_mingw32_metadata_inside_the_environment() {
+        let args = compile_plan(
+            &[(
+                "relative",
+                "Version: 1\nCflags: -Iinclude\nLibs: -Llib -lrelative\n",
+            )],
+            &["relative"],
+        );
+        assert_eq!(args[1], "-isystem");
+        assert!(args[2].ends_with("include"));
+        assert_eq!(args[3], "-L");
+        assert!(args[4].ends_with("lib"));
+        assert_eq!(args[5], "-lrelative");
+
+        let root = tempfile::tempdir().unwrap();
+        let env = root.path().join("env");
+        fs::create_dir_all(env.join("lib")).unwrap();
+        assert_eq!(relative(&env, "/mingw32/lib").unwrap(), "lib");
+        assert_eq!(relative(&env, "X:/ci/msys64/ucrt64/lib").unwrap(), "lib");
+        assert!(relative(&env, "X:/ci/other/ucrt64/lib").is_err());
+        assert!(relative(&env, "..").is_err());
+    }
+
+    #[test]
+    fn gnu_exact_archives_are_used_only_for_owned_nonstandard_names() {
+        let env = tempfile::tempdir().unwrap();
+        let directory = env.path().join("lib");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("example.a"), []).unwrap();
+        let package = PackageFiles {
+            name: "example".into(),
+            files: vec!["lib/example.a".into()],
+            static_link: false,
+        };
+        let dirs = ["lib".into()];
+        assert_eq!(
+            gnu_exact_archive(env.path(), &dirs, &package, "example").as_deref(),
+            Some("-l:example.a")
+        );
+        assert!(gnu_exact_archive(env.path(), &dirs, &package, "other").is_none());
+        fs::write(directory.join("libexample.dll.a"), []).unwrap();
+        assert!(gnu_exact_archive(env.path(), &dirs, &package, "example").is_none());
     }
 }

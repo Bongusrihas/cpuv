@@ -53,6 +53,7 @@ pub fn project_root(root: &Path) -> Result<PathBuf> {
 pub fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
     match action {
         Action::List => {
+            let _guard = cpuv_core::lease(root, false)?;
             let parent = root.join(".cpuv/profiles");
             let mut profiles = BTreeMap::new();
             if parent.is_dir() {

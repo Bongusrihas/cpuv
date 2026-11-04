@@ -32,20 +32,27 @@ pub async fn download(
         "Source downloads require HTTPS, except loopback registries"
     );
     fs::create_dir_all(cache)?;
+    let lock_parent = cache.join("locks");
+    let lock_key = spec.sha256.to_ascii_lowercase();
+    let _guard =
+        tokio::task::spawn_blocking(move || cpuv_core::object_lock(&lock_parent, &lock_key))
+            .await??;
     let target = cache.join(spec.sha256.to_ascii_lowercase());
-    if target.is_file() {
-        ensure!(
-            fs::metadata(&target)?.len() <= limits.archive_bytes,
-            "Cached source/tool archive exceeds --max-download-mib"
-        );
-        ensure!(
-            digest(&target)? == spec.sha256.to_ascii_lowercase(),
-            "Cached source archive was modified: {}",
-            target.display()
-        );
-        return Ok(target);
+    if target.exists() {
+        cpuv_core::regular(&target)?;
+        if fs::metadata(&target)?.len() <= limits.archive_bytes
+            && digest(&target)? == spec.sha256.to_ascii_lowercase()
+        {
+            return Ok(target);
+        }
+        cpuv_core::quarantine::preserve(&target, &cache.join("quarantine"))?;
     }
-    ensure!(!offline, "Source archive unavailable offline: {}", spec.url);
+    ensure!(
+        !offline,
+        "Verified source/tool archive {} is unavailable offline; restore it or retry online ({})",
+        target.display(),
+        spec.url
+    );
     let client = cpuv_fetch::policy::client(1, limits)?;
     let mut last_error = None;
     for attempt in 0..3 {
@@ -268,6 +275,38 @@ pub fn verify(root: &Path, files: &BTreeMap<String, String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn corrupt_archive_is_quarantined_with_an_actionable_offline_error() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"verified archive"));
+        let spec = Archive {
+            url: "http://127.0.0.1:1/source.tar.gz".into(),
+            sha256: expected.clone(),
+            archive: "tar.gz".into(),
+            strip_components: 0,
+            include: vec![],
+            exclude: vec![],
+        };
+        fs::write(root.path().join(&expected), b"damaged").unwrap();
+        let error = download(root.path(), &spec, true, &cpuv_fetch::Limits::default())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unavailable offline"));
+        assert!(!root.path().join(&expected).exists());
+        assert_eq!(
+            fs::read_dir(root.path().join("quarantine"))
+                .unwrap()
+                .count(),
+            1
+        );
+        fs::write(root.path().join(&expected), b"verified archive").unwrap();
+        assert_eq!(
+            download(root.path(), &spec, true, &cpuv_fetch::Limits::default())
+                .await
+                .unwrap(),
+            root.path().join(&expected)
+        );
+    }
     #[test]
     fn cached_tool_rejects_an_unexpected_side_loaded_file() {
         let dir = tempfile::tempdir().unwrap();

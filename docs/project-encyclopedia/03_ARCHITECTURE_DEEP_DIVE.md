@@ -1,5 +1,7 @@
 # 03 · Architecture deep dive
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Walkthrough](06_CODE_WALKTHROUGH.md) · [Diagrams](diagrams/README.md)
 
 ## Contents

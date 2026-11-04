@@ -23,6 +23,7 @@ pub use policy::Limits;
 #[derive(Clone)]
 pub struct Fetcher {
     client: reqwest::Client,
+    archive_mirror: Option<String>,
     pub repository: String,
     pub cache: PathBuf,
     pub concurrency: usize,
@@ -39,6 +40,12 @@ pub struct DownloadStats {
     pub bytes: u64,
     pub peak_concurrent_downloads: usize,
     pub elapsed_ms: u128,
+}
+
+fn official_archive_mirror(repository: &str) -> Option<String> {
+    let namespace = repository.strip_prefix("https://repo.msys2.org/mingw/")?;
+    matches!(namespace, "ucrt64" | "mingw64" | "mingw32")
+        .then(|| format!("https://mirror.msys2.org/mingw/{namespace}"))
 }
 
 impl Fetcher {
@@ -72,9 +79,11 @@ impl Fetcher {
             "Use HTTPS for repositories; HTTP is allowed only for local loopback servers"
         );
         let client = policy::client(concurrency, &limits)?;
+        let repository = repository.trim_end_matches('/');
         Ok(Self {
             client,
-            repository: repository.trim_end_matches('/').into(),
+            archive_mirror: official_archive_mirror(repository),
+            repository: repository.into(),
             cache,
             concurrency,
             offline,
@@ -127,30 +136,41 @@ impl Fetcher {
         let dir = self.cache.join("index");
         tokio::fs::create_dir_all(&dir).await?;
         let file = dir.join(format!("{key}.db"));
+        let lock_parent = dir.join("locks");
+        let _guard =
+            tokio::task::spawn_blocking(move || cpuv_core::object_lock(&lock_parent, &key))
+                .await??;
         let fresh = std::fs::metadata(&file)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|d| d < Duration::from_secs(3600));
         if self.offline || (!refresh && fresh) {
-            ensure!(
-                tokio::fs::metadata(&file)
-                    .await
-                    .context("No cached repository index; run once online")?
-                    .len()
-                    <= self.limits.index_bytes,
-                "Repository index exceeds --max-index-mib (this is metadata, not a package archive)"
-            );
-            let bytes = tokio::fs::read(&file)
-                .await
-                .context("No cached repository index; run once online")?;
-            let prefix = self.package_prefix.clone();
-            let limits = self.limits.clone();
-            let index = tokio::task::spawn_blocking(move || {
-                parse_database_with_limits(&bytes, &prefix, &limits)
-            })
-            .await??;
-            return Ok((index, true));
+            let cached: Result<Index> = async {
+                cpuv_core::regular(&file)
+                    .context("No regular cached repository index; run once online")?;
+                ensure!(
+                    tokio::fs::metadata(&file).await?.len() <= self.limits.index_bytes,
+                    "Repository index exceeds --max-index-mib"
+                );
+                let bytes = tokio::fs::read(&file).await?;
+                let prefix = self.package_prefix.clone();
+                let limits = self.limits.clone();
+                tokio::task::spawn_blocking(move || {
+                    parse_database_with_limits(&bytes, &prefix, &limits)
+                })
+                .await?
+            }
+            .await;
+            match cached {
+                Ok(index) => return Ok((index, true)),
+                Err(error) if self.offline => return Err(error).context(
+                    "Offline repository index unavailable or damaged; restore it or refresh online",
+                ),
+                Err(_) => {
+                    cpuv_core::quarantine::preserve(&file, &dir.join("quarantine"))?;
+                }
+            }
         }
         let url = format!("{}/{}", self.repository, self.database);
         let mut last = None;
@@ -210,16 +230,28 @@ impl Fetcher {
             let progress = &progress;
             async move {
                 ensure!(
+                    p.sha256.len() == 64
+                        && p.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                        && !p.filename.contains(['/', '\\', ':'])
+                        && p.filename.ends_with(".pkg.tar.zst"),
+                    "Invalid package archive identity"
+                );
+                ensure!(
                     p.size <= self.limits.archive_bytes,
                     "Package {} exceeds --max-download-mib",
                     p.name
                 );
                 let path = dir.join(format!("{}.pkg.tar.zst", p.sha256));
+                let lock_parent = dir.join("locks");
+                let key = p.sha256.clone();
+                let _cache_guard =
+                    tokio::task::spawn_blocking(move || cpuv_core::object_lock(&lock_parent, &key))
+                        .await??;
                 if path.exists() {
                     if verify_file(&path, &p.sha256, p.size).await.is_ok() {
                         return Ok((p, path, true, 0));
                     }
-                    tokio::fs::remove_file(&path).await?;
+                    cpuv_core::quarantine::preserve(&path, &dir.join("quarantine"))?;
                 }
                 ensure!(
                     !self.offline,
@@ -243,8 +275,16 @@ impl Fetcher {
                 bar.set_message(p.name.trim_start_matches(cpuv_solver::PREFIX).to_owned());
                 let mut last = None;
                 for attempt in 0..3 {
+                    let repository = if attempt == 1 {
+                        self.archive_mirror.as_deref().unwrap_or(&self.repository)
+                    } else {
+                        &self.repository
+                    };
+                    if repository != self.repository {
+                        eprintln!("Retrying {} via the MSYS2 mirror service", p.filename);
+                    }
                     bar.set_position(0);
-                    match self.download_one(&p, &path, &bar).await {
+                    match self.download_one(repository, &p, &path, &bar).await {
                         Ok(bytes) => {
                             bar.finish_and_clear();
                             return Ok((p, path, false, bytes));
@@ -281,7 +321,13 @@ impl Fetcher {
         Ok((paths, stats))
     }
 
-    async fn download_one(&self, p: &Package, path: &Path, bar: &ProgressBar) -> Result<u64> {
+    async fn download_one(
+        &self,
+        repository: &str,
+        p: &Package,
+        path: &Path,
+        bar: &ProgressBar,
+    ) -> Result<u64> {
         ensure!(
             p.size <= self.limits.archive_bytes,
             "Package exceeds --max-download-mib"
@@ -292,7 +338,7 @@ impl Fetcher {
         let mut bytes = 0;
         let response = self
             .client
-            .get(format!("{}/{}", self.repository, p.filename))
+            .get(format!("{repository}/{}", p.filename))
             .send()
             .await?
             .error_for_status()?;
@@ -391,3 +437,6 @@ pub fn parse_database_with_limits(bytes: &[u8], prefix: &str, limits: &Limits) -
     );
     Ok(index)
 }
+
+#[cfg(test)]
+mod tests;

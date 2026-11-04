@@ -115,14 +115,26 @@ fn publish_blob_with_ops(
 }
 
 fn pacman_metadata(path: &Path, kind: tar::EntryType) -> bool {
-    // MinGW packages may register host pacman hooks outside the toolchain prefix.
+    // MinGW packages may register pacman hooks or shell startup scripts outside
+    // the toolchain prefix. Neither is part of the project payload.
     // These are installer metadata, never project payload or executable hooks.
-    let ancestors = ["usr", "usr/share", "usr/share/libalpm"];
+    let ancestors = [
+        "usr",
+        "usr/share",
+        "usr/share/libalpm",
+        "etc",
+        "etc/profile.d",
+    ];
     (kind.is_dir() && ancestors.iter().any(|name| path == Path::new(name)))
         || ((kind.is_dir() || kind.is_file())
             && ["usr/share/libalpm/hooks", "usr/share/libalpm/scripts"]
                 .iter()
                 .any(|name| path.starts_with(name)))
+        || (kind.is_file()
+            && path.parent() == Some(Path::new("etc/profile.d"))
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sh")))
 }
 
 fn digest_file(path: &Path) -> Result<String> {
@@ -186,7 +198,12 @@ impl Store {
         if !path.exists() {
             return Ok(None);
         }
-        let stored: StoredPackage = serde_json::from_slice(&fs::read(path)?)?;
+        let mut stored: StoredPackage = serde_json::from_slice(&fs::read(path)?)?;
+        // Receipts and frozen locks from before build-base tracking omit it.
+        // The archive identity and the rest of the package metadata still agree.
+        if stored.package.base.is_none() || p.base.is_none() {
+            stored.package.base.clone_from(&p.base);
+        }
         ensure!(
             stored.package == *p,
             "Cached package metadata disagrees with lock for {}",
@@ -477,6 +494,26 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignores_regular_msys2_host_profile_scripts_without_admitting_other_etc_payload() {
+        let script = Path::new("etc/profile.d/z-perl-ucrt-x86_64.sh");
+        assert!(pacman_metadata(Path::new("etc"), tar::EntryType::Directory));
+        assert!(pacman_metadata(
+            Path::new("etc/profile.d"),
+            tar::EntryType::Directory
+        ));
+        assert!(pacman_metadata(script, tar::EntryType::Regular));
+        assert!(!pacman_metadata(script, tar::EntryType::Symlink));
+        assert!(!pacman_metadata(
+            Path::new("etc/perl.conf"),
+            tar::EntryType::Regular
+        ));
+        assert!(!pacman_metadata(
+            Path::new("etc/profile.d/foreign.dll"),
+            tar::EntryType::Regular
+        ));
+    }
     #[test]
     fn initial_blob_publication_works_without_hardlinks() {
         let root = tempfile::tempdir().unwrap();

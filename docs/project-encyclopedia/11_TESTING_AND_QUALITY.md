@@ -1,5 +1,7 @@
 # 11 · Testing and quality
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Build instructions](10_BUILD_RUN_TEST_AND_DEPLOY.md) · [Roadmap](16_IMPLEMENTATION_STATUS_AND_ROADMAP.md)
 
 ## Retained infrastructure

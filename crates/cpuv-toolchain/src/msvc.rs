@@ -15,7 +15,7 @@ pub fn installations() -> Vec<PathBuf> {
             "-property",
             "installationPath",
         ])
-        .output()
+        .bounded_output()
     else {
         return vec![];
     };
@@ -101,7 +101,13 @@ pub fn environment(compiler: &Path) -> Result<BTreeMap<String, String>> {
     setup.arg(format!(
         "\"\"{path}\" {target}{version_option} >nul && set\""
     ));
-    let output = setup.output()?;
+    // vcvarsall may perform first-use SDK discovery on slow/scanned installations.
+    // Keep a finite allowance distinct from short compiler/version observations.
+    let mut limits = cpuv_core::process::Limits::environment()?;
+    limits.timeout = std::time::Duration::from_secs(120);
+    limits.log_bytes = 2 * 1024 * 1024;
+    let output = cpuv_core::process::capture_with_limits(&mut setup, &limits)
+        .context("Initializing the Microsoft developer environment (120-second limit)")?;
     ensure!(
         output.status.success(),
         "Microsoft developer environment initialization failed: {}",
@@ -148,7 +154,7 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
         .args(flags)
         .arg(source)
         .current_dir(temporary.path())
-        .output()?;
+        .bounded_output()?;
     ensure!(
         output.status.success(),
         "Microsoft compiler/SDK probe failed: {}",
@@ -171,7 +177,7 @@ pub fn probe(path: PathBuf, flags: &[std::ffi::OsString]) -> Result<Toolchain> {
         .is_some_and(|s| s.eq_ignore_ascii_case("clang-cl"));
     let family = if clang { "clang" } else { "msvc" };
     let version = if clang {
-        let output = Command::new(&path).arg("--version").output()?;
+        let output = Command::new(&path).arg("--version").bounded_output()?;
         Regex::new(r"clang version (\d+\.\d+(?:\.\d+)?)")?
             .captures(&String::from_utf8_lossy(&output.stdout))
             .map(|c| c[1].to_owned())

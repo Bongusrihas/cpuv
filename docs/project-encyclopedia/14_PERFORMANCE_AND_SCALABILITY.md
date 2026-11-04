@@ -1,5 +1,7 @@
 # 14 · Performance and scalability
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Storage](07_DATA_MODEL_AND_STORAGE.md) · [Operations](15_ERROR_HANDLING_AND_OPERATIONS.md)
 
 ## Evidence boundary

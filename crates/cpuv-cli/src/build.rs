@@ -61,8 +61,12 @@ async fn other(context: &BuildContext<'_>, test: bool, arguments: &[OsString]) -
             source::managed::tool(name, artifact, cli).await?,
         );
     }
-    let (_, ninja) = source::build_tools(cli).await?;
-    tools.entry("ninja".into()).or_insert(ninja);
+    if specification.system == System::Meson && !tools.contains_key("ninja") {
+        tools.insert(
+            "ninja".into(),
+            source::tools::selected("ninja", cli, &manifest.tools).await?,
+        );
+    }
     let mut paths = vec![env.join("bin")];
     paths.extend(
         tools
@@ -108,13 +112,15 @@ async fn other(context: &BuildContext<'_>, test: bool, arguments: &[OsString]) -
         value
             .envs(&tc.environment)
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            .env("NINJA", &tools["ninja"])
             .env("PATH", &path)
             .current_dir(source)
             .env_remove("CPPFLAGS")
             .env_remove("CFLAGS")
             .env_remove("CXXFLAGS")
             .env_remove("LDFLAGS");
+        if let Some(ninja) = tools.get("ninja") {
+            value.env("NINJA", ninja);
+        }
         value
     };
     let jobs = cli
@@ -196,7 +202,7 @@ async fn other(context: &BuildContext<'_>, test: bool, arguments: &[OsString]) -
         return Ok(stage(&mut run, root, "meson-test")?.code().unwrap_or(1));
     }
     let copied = build.join("source");
-    source::native::project_copy(source, &copied)?;
+    source::native::sync_project_copy(source, &copied, &build.join("source-files.json"))?;
     if specification.system == System::Make {
         let default = if tc.driver == "msvc" {
             "nmake"
@@ -361,6 +367,9 @@ async fn other(context: &BuildContext<'_>, test: bool, arguments: &[OsString]) -
             !specification.test_arguments.is_empty(),
             "MSBuild tests need explicit build.test_arguments"
         );
+        if let Some(runtime) = &manifest.runtime {
+            msbuild.envs(runtime.variables(source, &path)?);
+        }
         msbuild.args(&specification.test_arguments);
     } else {
         msbuild.args(&specification.arguments);
@@ -405,13 +414,7 @@ pub async fn execute(root: &Path, cli: &Cli, test: bool, arguments: &[OsString])
         source.join("CMakeLists.txt").is_file(),
         "No CMakeLists.txt; use cpuv run for another build system or a direct compiler command"
     );
-    let (mut cmake, mut ninja) = source::build_tools(cli).await?;
-    if let Some(spec) = manifest.tools.get("cmake") {
-        cmake = source::managed::tool("cmake", spec, cli).await?;
-    }
-    if let Some(spec) = manifest.tools.get("ninja") {
-        ninja = source::managed::tool("ninja", spec, cli).await?;
-    }
+    let (cmake, ninja) = source::tools::selected_build_tools(cli, &manifest.tools).await?;
     let mut paths = vec![
         env.join("bin"),
         cmake.parent().unwrap().to_owned(),

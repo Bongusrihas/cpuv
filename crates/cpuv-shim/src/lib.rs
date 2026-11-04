@@ -172,6 +172,7 @@ pub fn run() -> Result<i32> {
     let _environment_guard = cpuv_core::lease(root, false)?;
     cpuv_core::verify(&env)?;
     let metadata: Environment = serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;
+    cpuv_core::locks::verify_identity(root, metadata.lock_identity.as_deref())?;
     let expected: toml::Value = toml::from_str(
         &fs::read_to_string(env.join("request.toml"))
             .context("Legacy environment request; run cpuv lock")?,

@@ -1,6 +1,6 @@
-# Phase 3: compatibility, release trust, and maintenance (unreleased)
+# Phase 3: compatibility, release trust, and maintenance in 0.0.5
 
-Phase 3 extends the finite Phase 1/2 acceptance workflows. It does not claim universal compiler or library support. The published 0.0.4 assets do not include these source changes.
+Phase 3 extends the Phase 1 and Phase 2 acceptance workflows with the compiler, library and lifecycle cases below.
 
 ## Reproducible compatibility gate
 

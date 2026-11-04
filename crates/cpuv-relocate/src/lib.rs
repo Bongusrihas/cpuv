@@ -16,6 +16,8 @@ pub struct Environment {
     #[serde(default)]
     pub request_hash: String,
     #[serde(default)]
+    pub lock_identity: Option<String>,
+    #[serde(default)]
     pub native_build_only: bool,
     pub compiler: PathBuf,
     pub compiler_bin: PathBuf,
@@ -111,10 +113,7 @@ pub fn index_environment(
             continue;
         }
         let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|x| x.eq_ignore_ascii_case("pc"))
-        {
+        if linking::is_pkg_config_module(path.strip_prefix(env)?) {
             let text = fs::read_to_string(path)?;
             // Relocate common MSYS2 prefixes, preserving variable-based definitions.
             let pc_dir = path.parent().unwrap();
@@ -165,6 +164,7 @@ pub fn index_environment(
     let metadata = Environment {
         schema: 1,
         request_hash: String::new(),
+        lock_identity: None,
         native_build_only: false,
         compiler_bin: compiler.parent().context("No compiler bin")?.to_owned(),
         driver: "gnu".into(),

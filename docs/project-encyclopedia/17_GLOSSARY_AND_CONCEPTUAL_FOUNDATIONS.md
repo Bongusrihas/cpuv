@@ -1,5 +1,7 @@
 # 17 · Glossary and conceptual foundations
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Schemas](07_DATA_MODEL_AND_STORAGE.md) · [Architecture](03_ARCHITECTURE_DEEP_DIVE.md)
 
 ## Compiler and interface concepts

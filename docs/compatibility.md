@@ -1,8 +1,8 @@
 # Compiler, linker, and ABI compatibility
 
-Version **0.0.4** targets native Windows C/C++ workflows. Compiler, runtime, SDK, architecture, library options and upstream package support must agree; downloading a library does not convert its ABI.
+CPUV targets native Windows C/C++ workflows. Compiler, runtime, SDK, architecture, library options and upstream package support must agree for a compatible build.
 
-For the unreleased Phase 2 changes and their reproducible gate, see [Phase 2](phase2.md). The table below records released 0.0.4 evidence; it is not evidence that the new source has already passed remote CI.
+For 0.0.5, see [Phase 2](phase2.md), [Phase 3](phase3.md) and the [live project matrix](project-matrix.md). The table below records the historical 0.0.4 checks.
 
 For the new compiler/image/consumer matrix, native ARM64 job, desktop lab workflow and measured verification boundary, see [Phase 3](phase3.md). Only completed jobs and retained evidence establish acceptance for those lanes.
 

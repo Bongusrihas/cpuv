@@ -1,5 +1,7 @@
 # 20 · Timeline and recoverable history
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Current status](16_IMPLEMENTATION_STATUS_AND_ROADMAP.md)
 
 ## Evidence scope

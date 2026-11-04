@@ -1,5 +1,8 @@
 # cpuv project encyclopedia
 
+**November working tree:** [Maintenance review](../maintenance-review.md) supersedes historical claims about missing tests, environment integrity, transactions and cache collection. It records current lock/cache/build fixes and remaining release/lab/trust boundaries.
+
+
 An engineering knowledge base for the inspected cpuv implementation: purpose, source structure, execution, schemas, trust, operations, history, and limitations.
 
 **2026-10-24 update:** [Version 0.0.4](../release-notes/v0.0.4.md) adds verified environments, recovery/cache repair, retained acceptance gates and additional compiler/provider integrations. Use the [current architecture](../architecture.md) and [compatibility matrix](../compatibility.md); baseline chapters below remain historical inventories.

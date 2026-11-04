@@ -1,5 +1,7 @@
 # 10 · Build, run, verify, and deploy
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Quality results](11_TESTING_AND_QUALITY.md) · [Configuration](12_CONFIGURATION_AND_ENVIRONMENT.md)
 
 ## Prerequisites and preparation

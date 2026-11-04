@@ -9,9 +9,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 pub mod arguments;
+pub mod binary;
 pub mod generations;
 pub mod locks;
 pub mod process;
+pub mod quarantine;
 
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let mut temp =
@@ -20,6 +22,28 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Serialize publication/repair of an immutable object without excluding other objects.
+pub fn object_lock(parent: &Path, key: &str) -> Result<File> {
+    ensure!(
+        !key.is_empty() && key.bytes().all(|c| c.is_ascii_hexdigit()),
+        "Invalid cache lock key"
+    );
+    fs::create_dir_all(parent)?;
+    no_reparse(parent)?;
+    let path = parent.join(format!("{key}.lock"));
+    if path.exists() {
+        regular(&path)?;
+    }
+    let guard = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    guard.lock_exclusive()?;
+    Ok(guard)
 }
 
 pub fn digest(path: &Path) -> Result<String> {
@@ -99,6 +123,27 @@ pub fn safe_relative(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a not-yet-created output through its nearest existing ancestor, including junctions.
+pub fn resolved_destination(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut tail = Vec::new();
+    while !ancestor.try_exists()? {
+        tail.push(
+            ancestor
+                .file_name()
+                .context("Output has no existing ancestor")?
+                .to_owned(),
+        );
+        ancestor = ancestor.parent().context("Output has no parent")?;
+    }
+    let mut resolved = ancestor.canonicalize()?;
+    for part in tail.into_iter().rev() {
+        resolved.push(part);
+    }
+    Ok(resolved)
+}
+
 pub fn lease(root: &Path, exclusive: bool) -> Result<File> {
     fs::create_dir_all(root.join(".cpuv"))?;
     no_reparse(&root.join(".cpuv"))?;
@@ -132,6 +177,15 @@ pub fn lease(root: &Path, exclusive: bool) -> Result<File> {
 
 pub type Inventory = BTreeMap<PathBuf, String>;
 pub fn inventory(root: &Path) -> Result<Inventory> {
+    inventory_with_receipt(root, true)
+}
+
+/// Generic file inventories include ordinary application files named files.json.
+pub fn inventory_all(root: &Path) -> Result<Inventory> {
+    inventory_with_receipt(root, false)
+}
+
+fn inventory_with_receipt(root: &Path, exclude_receipt: bool) -> Result<Inventory> {
     let mut entries = BTreeMap::new();
     for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
         let entry = entry?;
@@ -143,7 +197,10 @@ pub fn inventory(root: &Path) -> Result<Inventory> {
         if entry.file_type().is_file() {
             regular(entry.path())?;
             let relative = entry.path().strip_prefix(root)?;
-            if relative == Path::new("files.json") {
+            if exclude_receipt
+                && relative.components().count() == 1
+                && relative.as_os_str().eq_ignore_ascii_case("files.json")
+            {
                 continue;
             }
             entries.insert(relative.to_owned(), digest(entry.path())?);
@@ -357,7 +414,10 @@ pub fn recover(root: &Path) -> Result<()> {
 
 /// Stage lives within .cpuv. All old artifacts survive until a durable commit record.
 pub fn commit(root: &Path, stage: tempfile::TempDir, targets: &[(&str, &str)]) -> Result<()> {
-    if root.join("cpuv.toml").is_file() && root.join("cpuv.lock").is_file() {
+    if targets.iter().any(|(target, _)| *target == ".cpuv/env")
+        && root.join("cpuv.toml").is_file()
+        && root.join("cpuv.lock").is_file()
+    {
         generations::retain(root)?;
     }
     commit_with(root, stage, targets, |_| Ok(()))
@@ -431,6 +491,18 @@ fn commit_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generic_inventory_preserves_receipt_named_assets() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("Files.JSON"), "application data").unwrap();
+        fs::write(root.path().join("nested/files.json"), "nested data").unwrap();
+        let all = inventory_all(root.path()).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(inventory(root.path()).unwrap().len(), 1);
+        seal(root.path()).unwrap();
+        verify(root.path()).unwrap();
+    }
     #[test]
     fn inventory_detects_changes_additions_and_missing_files() {
         let root = tempfile::tempdir().unwrap();

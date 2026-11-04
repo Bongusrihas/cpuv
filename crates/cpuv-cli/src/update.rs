@@ -1,6 +1,7 @@
 //! Download, verify, and replace the invoked executable without a shell or Rust.
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use cpuv_core::process::CommandOutput as _;
 use fs2::FileExt;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
@@ -190,7 +191,7 @@ pub async fn run(options: &Options, offline: bool) -> Result<i32> {
     fs::write(&candidate, bytes)?;
     let output = Command::new(&candidate)
         .arg("--version")
-        .output()
+        .bounded_output()
         .context("Checking downloaded cpuv executable")?;
     ensure!(
         output.status.success()

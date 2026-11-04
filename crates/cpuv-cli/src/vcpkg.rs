@@ -1,5 +1,6 @@
 //! A provider-owned vcpkg graph, pinned to an immutable registry/tool revision.
 use super::*;
+use cpuv_core::process::CommandOutput as _;
 
 const REVISION: &str = "0c2a9ace1964b818b15f7ae50ba1c42404918a7b";
 fn revision() -> String {
@@ -97,7 +98,9 @@ fn prepare(cache: &Path, settings: &Settings, offline: bool) -> Result<PathBuf> 
         run(git(temporary.path()).args(["checkout", "--detach", "FETCH_HEAD"]))?;
         fs::rename(temporary.path(), &directory)?;
     }
-    let output = git(&directory).args(["rev-parse", "HEAD"]).output()?;
+    let output = git(&directory)
+        .args(["rev-parse", "HEAD"])
+        .bounded_output()?;
     ensure!(
         output.status.success()
             && String::from_utf8_lossy(&output.stdout)
@@ -462,6 +465,7 @@ pub async fn sync(
     metadata.configuration = manifest.project.configuration.clone();
     metadata.driver = tc.driver.clone();
     metadata.process_environment = tc.environment.clone();
+    maintenance::record_toolchain(&env, tc)?;
     let mut identity = identity;
     let mut provider_files = vec![checkout.join("vcpkg.exe")];
     let provider_roots = vec![checkout.join("scripts"), checkout.join("triplets")];
@@ -509,10 +513,11 @@ pub async fn sync(
     for entry in walkdir::WalkDir::new(&env) {
         let entry = entry?;
         if entry.file_type().is_file()
-            && entry
+            && (entry
                 .path()
                 .extension()
-                .is_some_and(|e| e == "cmake" || e == "pc")
+                .is_some_and(|e| e.eq_ignore_ascii_case("cmake"))
+                || cpuv_relocate::linking::is_pkg_config_module(entry.path().strip_prefix(&env)?))
         {
             let text = fs::read_to_string(entry.path())?;
             fs::write(
@@ -535,7 +540,6 @@ pub async fn sync(
         )?,
     )?;
     metadata.tool_identity.verify().context("Compiler/SDK or provider scripts changed during the build; previous environment is preserved")?;
-    cpuv_core::seal(&env)?;
     let locked = Lock {
         version: 4,
         identity_schema,
@@ -546,6 +550,7 @@ pub async fn sync(
         toolchain_identity: identity_hash,
         installed_status: status,
     };
+    maintenance::bind_lock(&env, &toml::to_string_pretty(&locked)?)?;
     fs::write(
         stage.path().join("cpuv.toml"),
         toml::to_string_pretty(manifest)?,

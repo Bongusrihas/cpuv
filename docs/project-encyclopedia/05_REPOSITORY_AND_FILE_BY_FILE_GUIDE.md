@@ -1,5 +1,7 @@
 # 05 · Repository and file guide
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Full file coverage](COVERAGE_MATRIX.md) · [Symbol lookup](21_REFERENCE_CATALOG.md)
 
 ## Root and tooling

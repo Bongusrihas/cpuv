@@ -1,5 +1,7 @@
 # 09 · Security and trust model
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Issues](19_KNOWN_ISSUES_AND_TECHNICAL_DEBT.md) · [Existing policy](../../SECURITY.md)
 
 ## Scope and identity

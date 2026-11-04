@@ -1,5 +1,7 @@
 # 19 · Known issues and technical debt
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Status](16_IMPLEMENTATION_STATUS_AND_ROADMAP.md) · [Security](09_SECURITY_AND_TRUST_MODEL.md)
 
 These findings were documented without broadening the requested code change. Severity reflects impact if the condition occurs, not a CVE score. Reproduction marked proposed was not executed against user data. Confirmed source limitations are distinguished from potential races and recommendations.

@@ -22,11 +22,11 @@ The package script creates these release assets under the ignored dist directory
 
 The executable embeds the Rust code and statically links the Microsoft C runtime. A prebuilt installation does not require Rust, Cargo, Git, or a separate Visual C++ runtime installation. A compatible selected compiler is still required when a user compiles a C++ project.
 
-Before publishing, run `scripts/test-phase1.ps1 -ReleaseBuild -Compiler PATH_TO_UCRT64_GXX`. The gate retains compiler identity, source/binary hashes and logs; release CI uploads this evidence. See [0.0.4 notes](release-notes/v0.0.4.md).
+Before publishing, run the optimized Phase 1, Phase 2 and Phase 3 acceptance scripts and the live project matrix. Keep the project logs, compiler identity, source and binary hashes, audit, and dependency inventory with the release evidence. See the [0.0.5 notes](release-notes/v0.0.5.md) and [project matrix](project-matrix.md).
 
 ## Publish on GitHub
 
-Commit and upload the source first. Set the workspace version in Cargo.toml and update Cargo.lock and documentation together. Add release notes under docs/release-notes/vVERSION.md. Create and push a matching version tag, such as v0.0.4. The Release Windows executable workflow checks formatting, Clippy, unit/regression tests and complete optimized Phase 1 acceptance, then packages the assets, verifies their checksum files, uploads all assets to a draft, and publishes the completed GitHub Release. A manual workflow run builds downloadable Actions artifacts without publishing a release.
+Commit and upload the validated source first. Set the workspace version in `Cargo.toml` and update `Cargo.lock` and the release notes together. Create and push the matching version tag, such as `v0.0.5`. The release workflow runs formatting, Clippy, workspace tests and all three optimized acceptance gates. It inventories and audits dependencies, attests the assets, verifies their checksums and publishes the completed GitHub release. A manual workflow run produces downloadable Actions artifacts for review.
 
 Alternatively, create a GitHub Release for the matching tag and attach all five locally built assets above. Upload executable assets, not just GitHub's automatically generated source ZIP. When using manual upload, publish only after all assets are attached.
 

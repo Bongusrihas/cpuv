@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.5
+
+- Bind installed environments and raw shims to the exact provider lock; retain installed resolutions when saving generations after user edits.
+- Repair damaged immutable snapshots, malformed tool receipts, archive/index caches through retained quarantine and per-object publication locks.
+- Preserve receipt-named asset files and empty asset directories, reconcile deleted copied build inputs, and apply runtime variables to MSBuild tests.
+- Track C drivers/private headers/resource tools, bound unattended probes, honor bootstrap overrides offline, and serialize diagnostics/cleanup consistently.
+- Index cache retention and virtual providers once, reuse verified operation-local hashes, and inspect binaries through bounded read-only Windows mappings.
+- Add preview-first log retention, actionable protected/missing-root reporting, and regressions for corruption, lock drift, process limits, archive inspection and build ownership.
+- Install packages with missing or ambiguous automatic link metadata and report the packages that need an explicit link selection. Retry failed official MSYS2 archive transfers through the official mirror service with the same size and digest checks.
+- Resolve package-relative and recognized MSYS2 build paths inside the managed environment. Link owned GNU archives by exact filename when needed, ignore host shell startup scripts, and preserve unrelated files named `*.pc` as package data.
+- Avoid eager MSYS2 deployed snapshots during online installs and generation copies when the active environment stays the same.
+- Identify MSYS2 compiler-family packages through the catalog's build base and check their major version against the selected compiler. Keep live matrix retry requests in an explicit fixture file.
+- See [maintenance review](docs/maintenance-review.md) for migration, storage/refresh/transfer contracts, verification evidence and release/trust boundaries.
+
 ## 0.0.4 — 2026-10-24
 
 - Correct ordered/static metadata linking, scoped flags, pkg-config expansion and paths containing spaces.

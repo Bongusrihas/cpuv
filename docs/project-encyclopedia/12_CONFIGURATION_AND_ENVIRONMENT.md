@@ -1,5 +1,7 @@
 # 12 · Configuration and environment reference
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Interfaces](08_API_AND_COMMUNICATION_PROTOCOLS.md) · [Storage](07_DATA_MODEL_AND_STORAGE.md)
 
 ## Resolution rules

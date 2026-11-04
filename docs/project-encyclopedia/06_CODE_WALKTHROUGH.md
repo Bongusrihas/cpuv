@@ -1,5 +1,7 @@
 # 06 · Execution walkthrough
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [Architecture](03_ARCHITECTURE_DEEP_DIVE.md) · [Interfaces](08_API_AND_COMMUNICATION_PROTOCOLS.md)
 
 ## Contents

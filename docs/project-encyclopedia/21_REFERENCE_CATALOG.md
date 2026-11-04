@@ -1,5 +1,7 @@
 # 21 · Reference catalog
 
+> Historical baseline: this chapter retains its original audit date. See the [November maintenance update](../maintenance-review.md) and current [compatibility policy](../compatibility.md) for changed implementation and verification boundaries.
+
 [Index](MASTER_INDEX.md) · [File guide](05_REPOSITORY_AND_FILE_BY_FILE_GUIDE.md) · [Configuration](12_CONFIGURATION_AND_ENVIRONMENT.md)
 
 This catalog is generated from the inspected post-feature source inventory and Cargo.lock. Line numbers identify this snapshot, not a permanent API guarantee. Local functions are included as navigation aids, not promised public crate interfaces. Narrative behavior is in chapters 03–09.

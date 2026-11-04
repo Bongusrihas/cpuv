@@ -1,6 +1,6 @@
-# Phase 2: Windows development workflows (unreleased)
+# Phase 2: Windows development workflows in 0.0.5
 
-These changes are in the source tree after 0.0.4. Installing the published 0.0.4 release does not install them. Use a build from this source tree until a new release is published. A successful gate establishes its recorded compiler/consumer combinations; it cannot certify every library, compiler version or Windows image.
+These workflows are included in 0.0.5. The gates record the compiler and consumer combinations they exercise.
 
 ## Local verification boundary
 

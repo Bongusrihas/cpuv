@@ -34,6 +34,7 @@ impl Server {
         let worker = thread::spawn(move || {
             while !finished.load(Ordering::SeqCst) {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .unwrap();

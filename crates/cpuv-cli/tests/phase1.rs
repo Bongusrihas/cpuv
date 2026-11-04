@@ -44,6 +44,7 @@ impl Repository {
                     }
                     Err(error) => panic!("HTTP fixture: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -135,6 +136,7 @@ fn package(
     (
         Package {
             name: format!("{PREFIX}{name}"),
+            base: None,
             version: version.into(),
             filename: format!("{PREFIX}{name}-{version}-any.pkg.tar.zst"),
             sha256: format!("{:x}", Sha256::digest(&payload)),
@@ -453,6 +455,104 @@ fn phase1_local_repository_native_consumers_and_recovery() {
     let env = f.project.join(".cpuv/env");
     let metadata: cpuv_relocate::Environment =
         serde_json::from_slice(&fs::read(env.join("manifest.json")).unwrap()).unwrap();
+    assert!(
+        metadata
+            .tool_identity
+            .files
+            .contains_key(&f.compiler.with_file_name("gcc.exe"))
+    );
+    let lock_path = f.project.join("cpuv.lock");
+    let original_lock = fs::read(&lock_path).unwrap();
+    let payload = cpuv_core::locks::read(&lock_path).unwrap();
+    let mut changed: toml::Value = toml::from_str(&payload).unwrap();
+    changed["packages"].as_array_mut().unwrap()[0]["version"] = "999.0-1".into();
+    fs::write(&lock_path, toml::to_string_pretty(&changed).unwrap()).unwrap();
+    f.fails(&["verify"], "does not match cpuv.lock");
+    f.fails(&["run", "g++", "main.cpp"], "does not match cpuv.lock");
+    let raw = Command::new(f.project.join(".cpuv/bin/g++.exe"))
+        .current_dir(&f.project)
+        .args(["-c", "main.cpp"])
+        .output()
+        .unwrap();
+    assert!(!raw.status.success() && text(&raw).contains("does not match cpuv.lock"));
+    fs::write(&lock_path, original_lock).unwrap();
+    f.ok(&["verify"]);
+    let tc_path = f.project.join(".cpuv/toolchain.json");
+    let tc_bytes = fs::read(&tc_path).unwrap();
+    let mut tc: serde_json::Value = serde_json::from_slice(&tc_bytes).unwrap();
+    tc["compiler_path"] = "changed-compiler.exe".into();
+    fs::write(&tc_path, serde_json::to_vec(&tc).unwrap()).unwrap();
+    f.fails(&["verify"], "Saved toolchain state disagrees");
+    fs::write(&tc_path, tc_bytes).unwrap();
+    let snapshot = f.cache.join("environments").join(
+        blake3::hash(
+            format!(
+                "{}:{}:{}",
+                blake3::hash(payload.as_bytes()).to_hex(),
+                metadata.request_hash,
+                cpuv_toolchain::identity(&cpuv_toolchain::probe(Some(&f.compiler)).unwrap())
+                    .unwrap()
+                    .portable_digest()
+                    .unwrap()
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string(),
+    );
+    assert!(
+        !snapshot.exists(),
+        "MSYS2 add should reuse the CAS without copying a snapshot"
+    );
+    f.ok(&["--offline", "sync"]);
+    fs::write(snapshot.join("unexpected.txt"), "damaged snapshot").unwrap();
+    f.ok(&["--offline", "sync"]);
+    cpuv_core::verify(&snapshot).unwrap();
+    assert!(f.cache.join("quarantine/environments").is_dir());
+    let assets = f.project.join("assets");
+    fs::create_dir_all(assets.join("nested")).unwrap();
+    fs::create_dir_all(assets.join("empty")).unwrap();
+    fs::write(assets.join("files.json"), "required data").unwrap();
+    fs::write(assets.join("nested/FILES.JSON"), "nested data").unwrap();
+    f.ok(&["run", "g++", "main.cpp"]);
+    let bundle = f.temp.path().join("regression bundle");
+    f.ok(&[
+        "bundle",
+        "main.exe",
+        bundle.to_str().unwrap(),
+        "--asset",
+        assets.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        fs::read_to_string(bundle.join("assets/files.json")).unwrap(),
+        "required data"
+    );
+    assert_eq!(
+        fs::read_to_string(bundle.join("assets/nested/FILES.JSON")).unwrap(),
+        "nested data"
+    );
+    assert!(bundle.join("assets/empty").is_dir());
+    let before_invalid_bundle = f.state();
+    f.fails(
+        &[
+            "bundle",
+            "main.exe",
+            assets.join("nested/output").to_str().unwrap(),
+            "--asset",
+            assets.to_str().unwrap(),
+        ],
+        "Bundle destination must be outside",
+    );
+    f.fails(
+        &[
+            "bundle",
+            "main.exe",
+            env.join("nested/output").to_str().unwrap(),
+        ],
+        "Bundle destination must be outside",
+    );
+    assert_eq!(before_invalid_bundle, f.state());
+    assert!(!assets.join("nested/output").exists() && !env.join("nested").exists());
     let actual = cpuv_relocate::compiler_args(&metadata, &env, &["main.cpp".into()]).unwrap();
     for flag in reference {
         if let Some(include) = flag.strip_prefix("-I") {

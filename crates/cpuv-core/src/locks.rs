@@ -61,6 +61,29 @@ pub fn read(path: &Path) -> std::io::Result<String> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:#}")))
 }
 
+/// Formatting and envelope migrations do not change a provider resolution's identity.
+pub fn identity(payload: &str) -> Result<String> {
+    let value: toml::Value = toml::from_str(payload).context("Invalid provider lock")?;
+    Ok(blake3::hash(&serde_json::to_vec(&value)?)
+        .to_hex()
+        .to_string())
+}
+
+pub fn verify_identity(root: &Path, installed: Option<&str>) -> Result<()> {
+    match read(&root.join("cpuv.lock")) {
+        Ok(payload) => ensure!(
+            installed == Some(identity(&payload)?.as_str()),
+            "Installed environment does not match cpuv.lock, or needs migration; run cpuv sync before building or exporting"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ensure!(
+            installed.is_none(),
+            "Installed dependency lock is missing; restore cpuv.lock and run cpuv sync"
+        ),
+        Err(error) => return Err(error).context("Validating installed dependency lock"),
+    }
+    Ok(())
+}
+
 pub fn write(root: &Path, destination: &Path, payload: &str, request_hash: &str) -> Result<()> {
     let value: toml::Value = toml::from_str(payload)?;
     let provider = value
@@ -101,6 +124,24 @@ pub fn write(root: &Path, destination: &Path, payload: &str, request_hash: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_identity_rejects_changed_missing_and_legacy_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let a = "version=1\npackages=[]\n[dependencies]\n";
+        let b = "version=1\nrepository='different'\npackages=[]\n[dependencies]\n";
+        let identity = identity(a).unwrap();
+        verify_identity(root.path(), None).unwrap();
+        assert!(verify_identity(root.path(), Some(&identity)).is_err());
+        fs::write(root.path().join("cpuv.lock"), a).unwrap();
+        verify_identity(root.path(), Some(&identity)).unwrap();
+        assert!(verify_identity(root.path(), None).is_err());
+        fs::write(root.path().join("cpuv.lock"), b).unwrap();
+        assert!(verify_identity(root.path(), Some(&identity)).is_err());
+        assert_eq!(
+            identity,
+            super::identity("packages = []\nversion = 1\n[dependencies]\n").unwrap()
+        );
+    }
     #[test]
     fn locks_round_trip_and_reject_mismatched_or_future_payloads() {
         let root = tempfile::tempdir().unwrap();

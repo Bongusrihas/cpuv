@@ -1,0 +1,20 @@
+# Explicit retry requests from the November 4 UCRT64 test. CPUV does not read this file.
+[adjustments.zlib-ng-compat]
+when = "Conflicting packages:"
+packages = ["zlib-ng-compat", "expat"]
+
+[adjustments.hidapitester]
+when = "imports missing libhidapi-0.dll"
+packages = ["hidapitester", "hidapi", "zlib", "expat"]
+
+[adjustments.libmongoose]
+when = "Requires references missing module libssl"
+packages = ["libmongoose", "openssl", "zlib", "expat"]
+
+[adjustments.opencl-icd]
+when = "Requires references missing module OpenCL-Headers"
+packages = ["opencl-icd", "opencl-headers", "zlib", "expat"]
+
+[adjustments.kiss_fft]
+when = "imports missing libpng16-16.dll"
+packages = ["kiss_fft", "libpng", "zlib", "expat"]

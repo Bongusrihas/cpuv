@@ -35,7 +35,7 @@ Explicit selection replaces automatic defaults. The generated link-plan.json rec
 
 An ABI fingerprint is a coarse compatibility filter. Equal hashes do not prove equal object layouts, instruction requirements, packing, feature macros, debug iterators, compiler ABI options, or exported interfaces. Header-only and C interfaces also have constraints; neither is automatically universally compatible.
 
-cpuv records GCC target/version, architecture, C runtime, thread and exception models, libstdc++ release/dual ABI, language ceiling, linker selection, and additional predefined ABI macros. Project dependency checks also compare selected runtime package versions. These observations narrow candidates; unknown upstream build options remain unknown.
+cpuv records GCC target and version, architecture, C runtime, thread and exception models, libstdc++ release and dual ABI, language ceiling, linker selection, and additional predefined ABI macros. MSYS2 checks use the catalog's build base to identify split packages from the compiler recipe and compare their major versions with the selected compiler. Older frozen locks can be restored without build base metadata. Explicit resolution records it when the catalog supplies it. These checks narrow the ABI compatibility boundary.
 
 Before committing a new managed environment, binary inspection checks PE architecture, direct runtime imports, and recognized COFF archive member architectures. It inventories exports/imports and checks named imported symbols when both DLLs are in the managed bin directory. A missing packaged export or machine mismatch aborts the staged update. compatibility.json records this evidence and explicitly sets binary_compatibility_guaranteed to false.
 
