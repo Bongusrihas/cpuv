@@ -404,6 +404,7 @@ mod tests {
             "sync".into(),
         ]);
         store(root.path(), &cli, payload, &env, &tc).unwrap();
+        let cache = cpuv_toolchain::driver_path(cache.canonicalize().unwrap());
         let snapshot = location(
             &cache,
             payload,
