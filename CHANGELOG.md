@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.6 — 2026-11-10
+
+- Preserve detailed dependency declarations during add/version edits and honor explicit provider choices when creating profiles.
+- Expose declared specialist tools and interpreter launchers to CMake builds; share runtime search paths across native test adapters and inherit selected developer variables in generic commands.
+- Translate C++03 and GNU/ISO standard choices explicitly, clear stale standard defaults, and reject profile overrides through build arguments.
+- Pin Conan compiler/SDK/bootstrap inputs and the selected host/build binary graph. Older catalog locks need an explicit `cpuv lock` migration before a provider rebuild.
+- Use canonical lock identities for artifact caches, with verified lookup of older snapshots; serialize vcpkg bootstrap and offline cache imports.
+- Bound raw-shim PE reads, stream DLL comparisons, index DLL candidates once, preserve unchanged copied source timestamps, cache the Requires parser, and use a deterministic ready queue for link ordering.
+- Write bootstrap transfers asynchronously, permit concurrent cache inspection, and parse help/version before creating the async runtime.
+- See [0.0.6 release notes](docs/release-notes/v0.0.6.md) and [review implementation status](improvements.md#006-implementation-status).
+
 ## 0.0.5
 
 - Bind installed environments and raw shims to the exact provider lock; retain installed resolutions when saving generations after user edits.

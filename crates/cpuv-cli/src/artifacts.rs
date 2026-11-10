@@ -2,7 +2,8 @@
 use super::*;
 
 pub fn key(payload: &str) -> String {
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
+    cpuv_core::locks::identity(payload)
+        .unwrap_or_else(|_| blake3::hash(payload.as_bytes()).to_hex().to_string())
 }
 
 pub fn location(cache: &Path, payload: &str, request: &str, compiler_identity: &str) -> PathBuf {
@@ -62,6 +63,36 @@ pub fn cached(
                 return Ok(Some(path));
             }
             cpuv_core::quarantine::preserve(&path, &cache.join("quarantine/environments"))?;
+        }
+    }
+    // Older releases keyed snapshots by payload formatting. Find a verified equivalent.
+    let parent = cache.join("environments");
+    if parent.is_dir() {
+        for entry in fs::read_dir(&parent)? {
+            let candidate = entry?.path();
+            let name = candidate.file_name().unwrap_or_default().to_string_lossy();
+            if candidate == path
+                || !candidate.is_dir()
+                || name.len() != 64
+                || !name.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            let _guard = snapshot_lock(&candidate)?;
+            if verify_snapshot(&candidate).is_err() {
+                continue;
+            }
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(candidate.join("artifact.json"))?)?;
+            let metadata: cpuv_relocate::Environment =
+                serde_json::from_slice(&fs::read(candidate.join("env/manifest.json"))?)?;
+            if metadata.lock_identity.as_deref() == Some(key(payload).as_str())
+                && metadata.request_hash == request_hash(manifest)?
+                && receipt["compiler_identity"]
+                    == cpuv_toolchain::identity(tc)?.portable_digest()?
+            {
+                return Ok(Some(candidate));
+            }
         }
     }
     let env = root.join(".cpuv/env");
@@ -180,7 +211,7 @@ pub fn restore(
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(source.join("artifact.json"))?)?;
     ensure!(
-        receipt["schema"] == 1 && receipt["lock_identity"] == key(payload),
+        receipt["schema"] == 1,
         "Artifact does not match the selected lock"
     );
     ensure!(
@@ -446,6 +477,14 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         worker.join().unwrap();
+        // Formatting-keyed snapshots from 0.0.5 remain discoverable after migration.
+        let legacy = cache.join("environments").join("a".repeat(64));
+        fs::rename(&snapshot, &legacy).unwrap();
+        let reformatted = "packages = []\nversion = 1\n[dependencies]\n";
+        assert_eq!(
+            cached(root.path(), &cli, &manifest, &tc, reformatted).unwrap(),
+            Some(legacy)
+        );
     }
     #[test]
     fn changed_compiler_is_rejected_before_an_artifact_is_published() {

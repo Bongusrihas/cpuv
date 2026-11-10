@@ -317,7 +317,13 @@ fn entries(cache: &Path) -> Result<(Vec<Entry>, bool)> {
 }
 
 pub fn execute(action: &Action, cache: &Path) -> Result<i32> {
-    let _lease = lease(cache, true)?;
+    let mutation = matches!(
+        action,
+        Action::Forget { .. }
+            | Action::Prune { apply: true, .. }
+            | Action::Logs { apply: true, .. }
+    );
+    let _lease = lease(cache, mutation)?;
     if let Action::Logs {
         apply,
         older_than_days,

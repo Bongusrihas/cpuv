@@ -13,6 +13,12 @@ pub struct Plan {
     pub environment: BTreeMap<String, String>,
 }
 impl Plan {
+    pub fn path(&self, root: &Path, base: &std::ffi::OsStr) -> Result<OsString> {
+        self.validate()?;
+        let mut paths: Vec<PathBuf> = self.search_paths.iter().map(|p| root.join(p)).collect();
+        paths.extend(std::env::split_paths(base));
+        Ok(std::env::join_paths(paths)?)
+    }
     pub fn validate(&self) -> Result<()> {
         for path in self
             .assets

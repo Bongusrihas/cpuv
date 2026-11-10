@@ -101,8 +101,17 @@ pub fn execute(action: &Action, root: &Path, cli: &Cli) -> Result<i32> {
                 manifest.tools = original.tools;
                 manifest.build = original.build;
                 manifest.runtime = original.runtime;
-                manifest.backend = original.backend;
-                manifest.vcpkg = original.vcpkg;
+                if cli.provider.is_none() && !cli.catalog && !cli.from_source {
+                    manifest.backend = original.backend;
+                }
+                manifest.vcpkg = if manifest.backend == Backend::Vcpkg {
+                    Some(original.vcpkg.unwrap_or_default())
+                } else {
+                    None
+                };
+                if manifest.backend == Backend::Vcpkg {
+                    vcpkg::validate(&tc, manifest.vcpkg.as_ref().unwrap())?;
+                }
                 let env = stage.path().join(".cpuv/env");
                 let mut metadata: cpuv_relocate::Environment =
                     serde_json::from_slice(&fs::read(env.join("manifest.json"))?)?;

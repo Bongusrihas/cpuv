@@ -214,6 +214,31 @@ struct CatalogLock {
     abi: cpuv_toolchain::AbiTuple,
     packages: BTreeMap<String, String>,
     upstream_lock: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_inputs: Option<String>,
+    #[serde(default)]
+    binary_graph: BTreeMap<String, String>,
+}
+
+fn binary_graph(graph: &serde_json::Value) -> Result<BTreeMap<String, String>> {
+    let nodes = graph["graph"]["nodes"]
+        .as_object()
+        .context("Catalog returned no graph")?;
+    let mut selected = BTreeMap::new();
+    for node in nodes.values() {
+        if let Some(reference) = node["ref"].as_str() {
+            let key = format!(
+                "{}:{reference}",
+                node["context"].as_str().unwrap_or("unknown")
+            );
+            let fields: BTreeMap<_, _> = ["package_id", "prev", "options", "settings"]
+                .into_iter()
+                .map(|field| (field, &node[field]))
+                .collect();
+            selected.insert(key, serde_json::to_string(&fields)?);
+        }
+    }
+    Ok(selected)
 }
 
 pub fn requests_locked(root: &Path, manifest: &Manifest, requests: &[String]) -> bool {
@@ -1274,6 +1299,22 @@ pub async fn sync(
         &manifest.tools,
     )
     .await?;
+    let build_inputs = blake3::hash(&serde_json::to_vec(&(
+        identity.portable_digest()?,
+        cpuv_core::digest(&tools.conan)?,
+        cpuv_core::digest(&tools.cmake)?,
+        cpuv_core::digest(&tools.ninja)?,
+        &manifest.tools,
+    ))?)
+    .to_hex()
+    .to_string();
+    if !refresh {
+        ensure!(
+            old.as_ref().and_then(|lock| lock.build_inputs.as_deref())
+                == Some(build_inputs.as_str()),
+            "Compiler/SDK or build tools changed, or lock needs migration; run cpuv lock explicitly"
+        );
+    }
     let stage = tempfile::Builder::new()
         .prefix("stage-catalog-")
         .tempdir_in(root.join(".cpuv"))?;
@@ -1425,6 +1466,14 @@ pub async fn sync(
         &log,
     )?;
     let graph: serde_json::Value = serde_json::from_slice(&fs::read(&graph_file)?)?;
+    let resolved_binary_graph = binary_graph(&graph)?;
+    if !refresh {
+        ensure!(
+            old.as_ref()
+                .is_some_and(|lock| lock.binary_graph == resolved_binary_graph),
+            "Locked package binary graph changed (recipe/package revision, settings, or build context); run cpuv lock explicitly"
+        );
+    }
     identity.verify().context(
         "Compiler/SDK changed while packages were being built; previous environment is preserved",
     )?;
@@ -1444,6 +1493,8 @@ pub async fn sync(
         );
     }
     let locked = CatalogLock {
+        build_inputs: Some(build_inputs),
+        binary_graph: resolved_binary_graph,
         version: 3,
         identity_schema: if refresh {
             2
@@ -1647,6 +1698,18 @@ pub async fn search(root: &Path, cli: &Cli, query: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn locked_binary_graph_tracks_revisions_and_build_context_but_not_local_paths() {
+        let mut graph = serde_json::json!({"graph":{"nodes":{"1":{"ref":"pkg/1#recipe", "context":"host", "package_id":"id", "prev":"first", "package_folder":"old"}}}});
+        let original = binary_graph(&graph).unwrap();
+        graph["graph"]["nodes"]["1"]["package_folder"] = "relocated".into();
+        assert_eq!(original, binary_graph(&graph).unwrap());
+        graph["graph"]["nodes"]["1"]["prev"] = "second".into();
+        assert_ne!(original, binary_graph(&graph).unwrap());
+        graph["graph"]["nodes"]["1"]["prev"] = "first".into();
+        graph["graph"]["nodes"]["1"]["context"] = "build".into();
+        assert_ne!(original, binary_graph(&graph).unwrap());
+    }
     fn dependency(linkage: &str) -> Dependency {
         Dependency::Detailed {
             version: "*".into(),

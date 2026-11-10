@@ -195,6 +195,9 @@ fn copy_snapshot(from: &Path, to: &Path, entries: &BTreeMap<String, String>) -> 
         let source = from.join(&relative);
         cpuv_core::regular(&source)?;
         let destination = to.join(relative);
+        if destination.is_file() && archive::digest(&destination)? == *digest {
+            continue;
+        }
         fs::create_dir_all(
             destination
                 .parent()
@@ -282,6 +285,13 @@ pub fn validate_build(build: &Build) -> Result<()> {
         "CMAKE_TOOLCHAIN_FILE",
         "CMAKE_INSTALL_PREFIX",
         "CMAKE_MAKE_PROGRAM",
+        "CMAKE_BUILD_TYPE",
+        "CMAKE_CXX_STANDARD",
+        "CMAKE_CXX_STANDARD_REQUIRED",
+        "CMAKE_CXX_EXTENSIONS",
+        "CMAKE_MSVC_RUNTIME_LIBRARY",
+        "CMAKE_C_FLAGS",
+        "CMAKE_CXX_FLAGS",
         "CC",
         "CXX",
         "CLTOOLPATH",
@@ -306,12 +316,42 @@ pub fn validate_build(build: &Build) -> Result<()> {
             "Invalid build variable"
         );
         ensure!(
-            !reserved.contains(&name.to_ascii_uppercase().as_str()),
+            !reserved.contains(&name.to_ascii_uppercase().as_str())
+                && !name.to_ascii_uppercase().starts_with("CMAKE_C_FLAGS_")
+                && !name.to_ascii_uppercase().starts_with("CMAKE_CXX_FLAGS_"),
             "Compiler/profile setting {name} is managed by cpuv"
         );
     }
     for argument in build.arguments.iter().chain(&build.test_arguments) {
         ensure!(!argument.contains('\0'), "Invalid build argument");
+        ensure!(
+            !["--config", "/p", "/property", "-p", "-property"]
+                .iter()
+                .any(|flag| argument.eq_ignore_ascii_case(flag)
+                    || argument.starts_with(&format!("{flag}="))),
+            "Build configuration is owned by the profile"
+        );
+        let normalized = argument.to_ascii_uppercase();
+        let key = normalized
+            .trim_start_matches("/P:")
+            .trim_start_matches("-P:")
+            .trim_start_matches("/PROPERTY:")
+            .trim_start_matches("-PROPERTY:")
+            .trim_start_matches("-D")
+            .split(['=', ':'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        ensure!(
+            !reserved.contains(&key.as_str())
+                && !key.starts_with("CMAKE_C_FLAGS_")
+                && !key.starts_with("CMAKE_CXX_FLAGS_")
+                && !(normalized.contains(';')
+                    && ["/P:", "-P:", "/PROPERTY:", "-PROPERTY:"]
+                        .iter()
+                        .any(|p| normalized.starts_with(p))),
+            "Compiler/profile setting {key} is managed by cpuv"
+        );
     }
     if build.system == System::Cmake {
         for argument in &build.arguments {
@@ -323,7 +363,7 @@ pub fn validate_build(build: &Build) -> Result<()> {
                 .to_ascii_uppercase();
             ensure!(
                 !reserved.contains(&key.as_str())
-                    && !["--toolchain", "-G", "-S", "-B"]
+                    && !["--toolchain", "--preset", "-C", "-U", "-G", "-S", "-B"]
                         .iter()
                         .any(|s| argument.starts_with(s)),
                 "CMake compiler/generator/source/build paths are owned by the profile"

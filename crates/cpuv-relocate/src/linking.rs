@@ -127,8 +127,11 @@ fn requirement_modules(
         ),
         &module.variables,
     )?;
-    let pattern =
-        regex::Regex::new(r"([A-Za-z0-9_.+-]+)(?:\s*(>=|<=|==|=|>|<)\s*([A-Za-z0-9_.:+~\-]+))?")?;
+    static REQUIRES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = REQUIRES.get_or_init(|| {
+        regex::Regex::new(r"([A-Za-z0-9_.+-]+)(?:\s*(>=|<=|==|=|>|<)\s*([A-Za-z0-9_.:+~\-]+))?")
+            .expect("constant Requires regex")
+    });
     let mut output = Vec::new();
     let mut end = 0;
     for capture in pattern.captures_iter(&text) {
@@ -361,15 +364,26 @@ pub fn apply_for(
         }
     }
     let mut ordered = Vec::new();
-    while let Some(name) = discovered
+    let ranks: BTreeMap<_, _> = discovered
         .iter()
-        .find(|n| incoming.get(*n) == Some(&0))
-        .cloned()
-    {
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect();
+    let mut ready: BTreeSet<_> = discovered
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| incoming.get(*n) == Some(&0))
+        .map(|(i, _)| i)
+        .collect();
+    while let Some(index) = ready.pop_first() {
+        let name = discovered[index].clone();
         incoming.remove(&name);
         for dependency in &edges[&name] {
             if let Some(count) = incoming.get_mut(dependency) {
                 *count -= 1;
+                if *count == 0 {
+                    ready.insert(ranks[dependency]);
+                }
             }
         }
         ordered.push(name);

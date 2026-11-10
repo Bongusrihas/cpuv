@@ -488,7 +488,7 @@ fn phase1_local_repository_native_consumers_and_recovery() {
         blake3::hash(
             format!(
                 "{}:{}:{}",
-                blake3::hash(payload.as_bytes()).to_hex(),
+                cpuv_core::locks::identity(&payload).unwrap(),
                 metadata.request_hash,
                 cpuv_toolchain::identity(&cpuv_toolchain::probe(Some(&f.compiler)).unwrap())
                     .unwrap()

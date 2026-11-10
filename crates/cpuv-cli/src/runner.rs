@@ -541,6 +541,7 @@ pub fn run(root: &Path, args: &[OsString], no_run: bool) -> Result<i32> {
         }
         return status(
             Command::new(program)
+                .envs(&metadata.process_environment)
                 .args(&args[1..])
                 .current_dir(&source_root)
                 .env("PATH", path)

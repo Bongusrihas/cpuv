@@ -1,6 +1,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::Read;
+use tokio::io::AsyncWriteExt;
 
 pub fn digest(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
@@ -62,7 +63,8 @@ pub async fn download(
                 response.content_length().unwrap_or(0) <= limits.archive_bytes,
                 "Source/tool archive exceeds --max-download-mib"
             );
-            let mut temporary = tempfile::NamedTempFile::new_in(cache)?;
+            let temporary = tempfile::NamedTempFile::new_in(cache)?;
+            let mut output = tokio::fs::File::from_std(temporary.reopen()?);
             let mut total = 0u64;
             let mut hash = Sha256::new();
             while let Some(bytes) = response.chunk().await? {
@@ -71,7 +73,7 @@ pub async fn download(
                     total <= limits.archive_bytes,
                     "Source/tool archive exceeds --max-download-mib"
                 );
-                temporary.write_all(&bytes)?;
+                output.write_all(&bytes).await?;
                 hash.update(&bytes);
             }
             ensure!(
@@ -79,7 +81,8 @@ pub async fn download(
                 "Source archive checksum mismatch: {}",
                 spec.url
             );
-            temporary.as_file().sync_all()?;
+            output.sync_all().await?;
+            drop(output);
             temporary.persist(&target).map_err(|error| error.error)?;
             Ok(())
         }

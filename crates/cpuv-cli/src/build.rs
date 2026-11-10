@@ -1,6 +1,88 @@
 //! Build-system integration uses native package targets and real selected compilers.
 use super::*;
 
+fn cmake_standard(standard: &str) -> Vec<OsString> {
+    if standard == "default" {
+        return [
+            "-UCMAKE_CXX_STANDARD",
+            "-UCMAKE_CXX_EXTENSIONS",
+            "-UCMAKE_CXX_STANDARD_REQUIRED",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    }
+    let value = standard
+        .trim_start_matches("gnu++")
+        .trim_start_matches("c++");
+    let value = if value == "03" { "98" } else { value };
+    vec![
+        format!("-DCMAKE_CXX_STANDARD={value}").into(),
+        format!(
+            "-DCMAKE_CXX_EXTENSIONS={}",
+            if standard.starts_with("gnu++") {
+                "ON"
+            } else {
+                "OFF"
+            }
+        )
+        .into(),
+        "-DCMAKE_CXX_STANDARD_REQUIRED=ON".into(),
+    ]
+}
+
+async fn declared_tools(
+    root: &Path,
+    cli: &Cli,
+    manifest: &Manifest,
+) -> Result<(BTreeMap<String, PathBuf>, PathBuf)> {
+    let mut tools = BTreeMap::new();
+    for (name, artifact) in &manifest.tools {
+        ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+            "Invalid project tool name {name}"
+        );
+        cpuv_store::safe_relative(Path::new(name))?;
+        tools.insert(
+            name.clone(),
+            source::managed::tool(name, artifact, cli).await?,
+        );
+    }
+    let launchers = root
+        .join(".cpuv/build/tool-launchers")
+        .join(request_hash(manifest)?);
+    fs::create_dir_all(&launchers)?;
+    for (name, artifact) in &manifest.tools {
+        let launcher = launchers.join(format!("{name}.cmd"));
+        if let Some(interpreter) = &artifact.interpreter {
+            let interpreter = tools
+                .get(interpreter)
+                .context("Declare the tool interpreter as a pinned [tools] entry")?;
+            let executable = &tools[name];
+            ensure!(
+                !interpreter.to_string_lossy().contains(['%', '\r', '\n'])
+                    && !executable.to_string_lossy().contains(['%', '\r', '\n']),
+                "Unsupported launcher path"
+            );
+            write_atomic(
+                &launcher,
+                format!(
+                    "@echo off\r\n\"{}\" \"{}\" %*\r\n",
+                    interpreter.display(),
+                    executable.display()
+                )
+                .as_bytes(),
+            )?;
+        } else if launcher.is_file() {
+            fs::remove_file(launcher)?;
+        }
+    }
+    Ok((tools, launchers))
+}
+
 fn stage(command: &mut Command, root: &Path, name: &str) -> Result<std::process::ExitStatus> {
     let log = root.join(".cpuv/logs").join(format!(
         "{name}-{}.log",
@@ -54,20 +136,14 @@ async fn other(context: &BuildContext<'_>, test: bool, arguments: &[OsString]) -
     output_lock
         .try_lock_exclusive()
         .context("Another build is using this profile")?;
-    let mut tools = BTreeMap::new();
-    for (name, artifact) in &manifest.tools {
-        tools.insert(
-            name.clone(),
-            source::managed::tool(name, artifact, cli).await?,
-        );
-    }
+    let (mut tools, launchers) = declared_tools(root, cli, manifest).await?;
     if specification.system == System::Meson && !tools.contains_key("ninja") {
         tools.insert(
             "ninja".into(),
             source::tools::selected("ninja", cli, &manifest.tools).await?,
         );
     }
-    let mut paths = vec![env.join("bin")];
+    let mut paths = vec![launchers, env.join("bin")];
     paths.extend(
         tools
             .values()
@@ -82,7 +158,11 @@ async fn other(context: &BuildContext<'_>, test: bool, arguments: &[OsString]) -
     {
         paths.extend(std::env::split_paths(&path));
     }
-    let path = std::env::join_paths(paths)?;
+    let path = manifest
+        .runtime
+        .clone()
+        .unwrap_or_default()
+        .path(source, &std::env::join_paths(paths)?)?;
     for artifact in manifest.tools.values() {
         if let Some(interpreter) = &artifact.interpreter {
             ensure!(
@@ -394,6 +474,11 @@ pub async fn execute(root: &Path, cli: &Cli, test: bool, arguments: &[OsString])
     cpuv_core::verify(&env)?;
     let tc: Toolchain = serde_json::from_slice(&fs::read(root.join(".cpuv/toolchain.json"))?)?;
     let specification = manifest.build.clone().unwrap_or_default();
+    let mut supplied = specification.clone();
+    supplied
+        .arguments
+        .extend(arguments.iter().map(|a| a.to_string_lossy().into_owned()));
+    source::native::validate_build(&supplied)?;
     if specification.system != source::native::System::Cmake {
         return other(
             &BuildContext {
@@ -415,12 +500,19 @@ pub async fn execute(root: &Path, cli: &Cli, test: bool, arguments: &[OsString])
         "No CMakeLists.txt; use cpuv run for another build system or a direct compiler command"
     );
     let (cmake, ninja) = source::tools::selected_build_tools(cli, &manifest.tools).await?;
+    let (tools, launchers) = declared_tools(root, cli, &manifest).await?;
     let mut paths = vec![
+        launchers,
         env.join("bin"),
         cmake.parent().unwrap().to_owned(),
         ninja.parent().unwrap().to_owned(),
         tc.compiler_path.parent().unwrap().to_owned(),
     ];
+    paths.extend(
+        tools
+            .values()
+            .filter_map(|p| p.parent().map(Path::to_owned)),
+    );
     if let Some(host) = cpuv_relocate::msys_host_bin(&metadata.compiler_bin) {
         paths.push(host);
     }
@@ -432,7 +524,11 @@ pub async fn execute(root: &Path, cli: &Cli, test: bool, arguments: &[OsString])
     {
         paths.extend(std::env::split_paths(&path));
     }
-    let path = std::env::join_paths(paths)?;
+    let path = manifest
+        .runtime
+        .clone()
+        .unwrap_or_default()
+        .path(&source, &std::env::join_paths(paths)?)?;
     let build = root.join(".cpuv/build/cmake");
     fs::create_dir_all(&build)?;
     let output_lock = OpenOptions::new()
@@ -488,13 +584,7 @@ pub async fn execute(root: &Path, cli: &Cli, test: bool, arguments: &[OsString])
     if toolchain.is_file() {
         configure.arg("--toolchain").arg(toolchain);
     }
-    if metadata.standard != "default" {
-        let standard = metadata
-            .standard
-            .trim_start_matches("gnu++")
-            .trim_start_matches("c++");
-        configure.arg(format!("-DCMAKE_CXX_STANDARD={standard}"));
-    }
+    configure.args(cmake_standard(&metadata.standard));
     for (name, value) in &specification.variables {
         ensure!(
             ![
@@ -562,4 +652,79 @@ pub async fn execute(root: &Path, cli: &Cli, test: bool, arguments: &[OsString])
         run.envs(runtime.variables(&source, &path)?);
     }
     Ok(stage(&mut run, root, "ctest")?.code().unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn declared_interpreter_tool_runs_from_verified_offline_archive() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        fs::create_dir_all(cache.join("catalog/archives")).unwrap();
+        let interpreter = fs::read(
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cscript.exe"),
+        )
+        .unwrap();
+        let mut tar = tar::Builder::new(Vec::new());
+        for (name, data) in [
+            ("cscript.exe", interpreter.as_slice()),
+            (
+                "generator.js",
+                b"WScript.Echo(\"pinned-generator\");\r\n".as_slice(),
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, name, data).unwrap();
+        }
+        let bytes = zstd::stream::encode_all(tar.into_inner().unwrap().as_slice(), 1).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(cache.join("catalog/archives").join(&digest), bytes).unwrap();
+        let artifact = |executable: &str, interpreter: Option<&str>| source::managed::Artifact {
+            version: "1".into(),
+            executable: executable.into(),
+            interpreter: interpreter.map(String::from),
+            conan_package: None,
+            version_arguments: vec![],
+            url: "http://127.0.0.1:1/tool.tar.zst".into(),
+            sha256: digest.clone(),
+            archive: "tar.zst".into(),
+            strip_components: 0,
+        };
+        let mut manifest: Manifest = toml::from_str("[project]\nname='test'\nversion='1'\n[toolchain]\ntarget='test'\ncompiler='test'\nabi='test'\n").unwrap();
+        manifest.tools = BTreeMap::from([
+            ("interpreter".into(), artifact("cscript.exe", None)),
+            (
+                "generator".into(),
+                artifact("generator.js", Some("interpreter")),
+            ),
+        ]);
+        let cli = Cli::parse_from([
+            OsString::from("cpuv"),
+            "--cache-dir".into(),
+            cache.into_os_string(),
+            "--offline".into(),
+            "info".into(),
+        ]);
+        let (_, launchers) = declared_tools(root.path(), &cli, &manifest).await.unwrap();
+        use cpuv_core::process::CommandOutput;
+        let output = Command::new(launchers.join("generator.cmd"))
+            .bounded_output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("pinned-generator"));
+    }
+    #[test]
+    fn cmake_standard_preserves_iso_extensions_and_clears_owned_defaults() {
+        let iso = cmake_standard("c++03");
+        assert!(iso.contains(&OsString::from("-DCMAKE_CXX_STANDARD=98")));
+        assert!(iso.contains(&OsString::from("-DCMAKE_CXX_EXTENSIONS=OFF")));
+        assert!(cmake_standard("gnu++20").contains(&OsString::from("-DCMAKE_CXX_EXTENSIONS=ON")));
+        assert!(cmake_standard("default").contains(&OsString::from("-UCMAKE_CXX_STANDARD")));
+    }
 }

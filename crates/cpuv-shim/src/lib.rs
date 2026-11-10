@@ -111,8 +111,22 @@ fn deploy_dlls(binary: &Path, env: &Path, compiler_bin: &Path) -> Result<()> {
         .unwrap_or(Path::new("."));
     let mut pending = vec![binary.to_owned()];
     let mut seen = BTreeSet::new();
+    let mut candidates = std::collections::BTreeMap::new();
+    for directory in [env.join("bin"), compiler_bin.to_owned()] {
+        if !directory.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                candidates
+                    .entry(entry.file_name().to_string_lossy().to_ascii_lowercase())
+                    .or_insert_with(|| entry.path());
+            }
+        }
+    }
     while let Some(path) = pending.pop() {
-        let bytes = fs::read(&path)?;
+        let bytes = cpuv_core::binary::Data::open(&path)?;
         let pe = match goblin::Object::parse(&bytes)? {
             goblin::Object::PE(pe) => pe,
             _ => continue,
@@ -127,29 +141,13 @@ fn deploy_dlls(binary: &Path, env: &Path, compiler_bin: &Path) -> Result<()> {
                     && !library.contains(['/', '\\', ':']),
                 "Unsafe PE import name"
             );
-            let source = [env.join("bin"), compiler_bin.to_owned()]
-                .into_iter()
-                .find_map(|dir| {
-                    let candidate = dir.join(library);
-                    if candidate.is_file() {
-                        return Some(candidate);
-                    }
-                    fs::read_dir(dir)
-                        .ok()?
-                        .filter_map(|e| e.ok())
-                        .find(|e| {
-                            e.file_name()
-                                .to_string_lossy()
-                                .eq_ignore_ascii_case(library)
-                        })
-                        .map(|e| e.path())
-                });
+            let source = candidates.get(&key).cloned();
             // Imports absent from both package and compiler bins are OS or user DLLs.
             if let Some(source) = source {
                 let dest = output.join(library);
                 if dest.exists() {
                     ensure!(
-                        fs::read(&dest)? == fs::read(&source)?,
+                        cpuv_core::digest(&dest)? == cpuv_core::digest(&source)?,
                         "{} already contains a different DLL; remove it or use a fresh output directory",
                         dest.display()
                     );

@@ -2,9 +2,11 @@
 
 A C++ dependency, build, and run workflow for Windows.
 
-**Version 0.0.5 · Windows · Apache-2.0**
+**Version 0.0.6 · Windows · Apache-2.0**
 
 cpuv manages native C++ dependencies, prepares a project environment, and compiles and runs your code with one command. Downloaded packages live in a shared cache. Generated programs and compiler artifacts stay in the hidden .cpuv directory.
+
+Version 0.0.6 fixes dependency editing, native tool/runtime propagation, profile settings, and cache identity. See the [0.0.6 release notes](docs/release-notes/v0.0.6.md) for lock migration and behavior changes.
 
 Version 0.0.5 includes declarative source packages, compiler provisioning, native build adapters, development transfers and cache management. See the [Phase 2 guide](docs/phase2.md) and [0.0.5 release notes](docs/release-notes/v0.0.5.md).
 

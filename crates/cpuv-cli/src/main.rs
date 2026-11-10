@@ -25,6 +25,8 @@ mod install;
 mod maintenance;
 mod offline;
 mod profiles;
+#[cfg(test)]
+mod release_tests;
 mod runner;
 mod runtime;
 mod search;
@@ -284,6 +286,41 @@ fn any_version() -> String {
     "*".into()
 }
 impl Dependency {
+    fn edited(&self, op: &str, value: &str, reference: Option<&str>) -> Result<Self> {
+        let mut next = self.clone();
+        if let Self::Detailed {
+            version,
+            reference: saved,
+            source,
+            ..
+        } = &mut next
+        {
+            ensure!(
+                source.is_none() || (reference.is_none() && op.is_empty()),
+                "Replace a source declaration explicitly with cpuv source add"
+            );
+            if let Some(reference) = reference {
+                *saved = Some(reference.into());
+            } else if !op.is_empty() {
+                ensure!(
+                    saved.is_none(),
+                    "Update a recipe reference with its full name/version reference"
+                );
+                *version = format!("{op}{value}");
+            }
+        } else if let Some(reference) = reference {
+            next = Self::Detailed {
+                version: "*".into(),
+                linkage: None,
+                reference: Some(reference.into()),
+                options: BTreeMap::new(),
+                source: None,
+            };
+        } else if !op.is_empty() {
+            next = Self::Simple(format!("{op}{value}"));
+        }
+        Ok(next)
+    }
     fn version(&self) -> Result<&str> {
         match self {
             Self::Simple(v) => Ok(v),
@@ -735,9 +772,12 @@ async fn sync_request(
                 }) {
                     bail!("{name} is already declared as {existing}");
                 }
+                let existing = manifest.dependencies.get(name).cloned();
                 manifest.dependencies.insert(
                     name.into(),
-                    if reference_name.is_some() {
+                    if let Some(existing) = existing {
+                        existing.edited(op, v, reference_name.map(|_| input.as_str()))?
+                    } else if reference_name.is_some() {
                         Dependency::Detailed {
                             version: "*".into(),
                             linkage: None,
@@ -1275,9 +1315,10 @@ fn main() {
     let result = if shim {
         cpuv_shim::run()
     } else {
+        let cli = Cli::parse();
         tokio::runtime::Runtime::new()
             .context("Starting cpuv runtime")
-            .and_then(|runtime| runtime.block_on(execute(Cli::parse())))
+            .and_then(|runtime| runtime.block_on(execute(cli)))
     };
     match result {
         Ok(code) => std::process::exit(code),
@@ -1308,7 +1349,13 @@ async fn execute(mut cli: Cli) -> Result<i32> {
     if let Action::Cache { command } = &cli.command {
         return cache::execute(command, &cache_root);
     }
-    let _cache_lease = cache::lease(&cache_root, false)?;
+    let importing = matches!(
+        &cli.command,
+        Action::Offline {
+            command: offline::Action::Import { .. }
+        }
+    );
+    let _cache_lease = cache::lease(&cache_root, importing)?;
     fs::create_dir_all(&cli.project)?;
     let mut root = cpuv_toolchain::driver_path(cli.project.canonicalize()?);
     if let Action::Profile { command } = &cli.command {

@@ -78,6 +78,8 @@ fn prepare(cache: &Path, settings: &Settings, offline: bool) -> Result<PathBuf> 
         settings.revision.len() == 40 && settings.revision.bytes().all(|c| c.is_ascii_hexdigit()),
         "vcpkg.revision must be an immutable 40-digit Git commit"
     );
+    let _bootstrap_guard =
+        cpuv_core::object_lock(&cache.join("bootstrap-locks"), &settings.revision)?;
     let directory = cache.join(&settings.revision);
     if !directory.is_dir() {
         ensure!(
