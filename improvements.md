@@ -31,7 +31,7 @@ Local validation on 2026-11-10:
 - Optimized Phase 1 native MSYS2 gate: passed, including standalone shim, corruption repair, rollback, and reader/writer exclusion.
 - Phase 2 source/provider gate: passed, including local/archive/Git/SDK/Make dependencies, generations, CMake tests, offline transfers and cache repair.
 - Installer and portable ZIP packaged; executable reports cpuv 0.0.6.
-- Local optimized MSVC Phase 3 consumer gate: in progress. Release automation independently runs the native acceptance gates before publishing assets.
+- Local optimized MSVC Phase 3 consumer gate: passed with MSVC 14.51 x64, including C/C++, static/shared/header-only components, code generation, GUI/resources, outage preservation and offline restoration. Release automation independently runs the wider acceptance matrix before publishing assets.
 
 The earlier Phase 1 run exposed the fixture's old raw-text artifact key expectation; it was updated to canonical identity and the complete native gate then passed.
 
